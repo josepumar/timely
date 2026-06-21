@@ -47,9 +47,13 @@
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
 
   const VERSION = '0.2';
-  const OT_THRESHOLD_HOURS = 40;
-  const WEEK_START_DAY        = 6;   // Saturday
-  const OT_MULTIPLIER_DEFAULT = 1.5; // Used for employee-facing earnings display
+  const OT_THRESHOLD_HOURS    = 40;
+  const WEEK_START_DAY        = 6;
+  const _otMultiplier = 1.5;
+
+  // Runtime values — overwritten by loadAppSettings() on startup
+  var _otThreshold  = OT_THRESHOLD_HOURS;
+  var _otMultiplier = _otMultiplier;
 
   // ─── Supabase Client ──────────────────────────────────────────────────────
   // Null when URL is empty — app falls back to mock auth/data (Phase 1 behaviour).
@@ -92,7 +96,7 @@
   }
 
   function weeklyTotals(entries, threshold) {
-    if (threshold === undefined) threshold = OT_THRESHOLD_HOURS;
+    if (threshold === undefined) threshold = _otThreshold;
     const byCode   = totalsByChargeCode(entries);
     const total    = Object.values(byCode).reduce((s, h) => s + h, 0);
     const regular  = Math.min(total, threshold);
@@ -336,6 +340,25 @@
     var r = await _supabase.from('profiles').update(row).eq('id', id).select().single();
     if (r.error) return dbErr(r.error.message);
     return ok(mapProfile(r.data));
+  }
+
+  async function loadAppSettings() {
+    if (!_supabase) return;
+    var r = await _supabase.from('app_settings').select('key, value');
+    if (r.error || !r.data) return;
+    r.data.forEach(function(row) {
+      if (row.key === 'ot_threshold_hours') _otThreshold  = parseFloat(row.value) || OT_THRESHOLD_HOURS;
+      if (row.key === 'ot_multiplier')      _otMultiplier = parseFloat(row.value) || OT_MULTIPLIER_DEFAULT;
+    });
+  }
+
+  async function saveAppSetting(key, value) {
+    if (!_supabase) return ok(true);
+    var r = await _supabase.from('app_settings').update({ value: String(value) }).eq('key', key);
+    if (r.error) return dbErr(r.error.message);
+    if (key === 'ot_threshold_hours') _otThreshold  = parseFloat(value) || OT_THRESHOLD_HOURS;
+    if (key === 'ot_multiplier')      _otMultiplier = parseFloat(value) || OT_MULTIPLIER_DEFAULT;
+    return ok(true);
   }
 
   async function getTimesheetForWeek(userId, weekStartIso) {
@@ -725,6 +748,7 @@
             adminNavItem('#/admin/expense-categories', 'Expense Categories', currentHash) +
             adminNavItem('#/admin/users',              'Users',              currentHash) +
             adminNavItem('#/admin/billing',            'Billing Report',     currentHash) +
+            adminNavItem('#/admin/settings',           'Settings',           currentHash) +
           '</ul>' +
           '<div class="admin-sidebar__footer">' +
             '<div style="font-size:var(--font-size-xs);color:var(--color-neutral-400);margin-bottom:var(--space-2)">' +
@@ -1034,7 +1058,7 @@
   function empRenderTotals() { empRecalcTotals(); }
 
   function empRecalcTotals() {
-    var result   = weeklyTotals(_empEntries, OT_THRESHOLD_HOURS);
+    var result   = weeklyTotals(_empEntries, _otThreshold);
     var total    = result.total, regular = result.regular, overtime = result.overtime, byCode = result.byCode;
     var tbodyEl  = _empRoot.querySelector('#totals-by-code');
     if (tbodyEl) {
@@ -1058,7 +1082,7 @@
       var empUser = currentUser();
       var empRate = empUser ? (empUser.hourlyRate || 0) : 0;
       if (empRate > 0) {
-        var empOtRate = empRate * OT_MULTIPLIER_DEFAULT;
+        var empOtRate = empRate * _otMultiplier;
         var regAmt    = regular  * empRate;
         var otAmt     = overtime * empOtRate;
         var totAmt    = regAmt + otAmt;
@@ -1445,7 +1469,7 @@
     var user   = currentUser();
     var fmtM   = function(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0); };
     var rate   = user ? (user.hourlyRate || 0) : 0;
-    var otRate = rate * OT_MULTIPLIER_DEFAULT;
+    var otRate = rate * _otMultiplier;
 
     root.innerHTML =
       '<div style="max-width:var(--content-max-width);margin:0 auto;padding:var(--space-8) var(--space-4)">' +
@@ -1458,7 +1482,7 @@
           esc(user ? user.name : '') +
           (rate > 0
             ? ' &nbsp;&middot;&nbsp; Rate: <strong style="color:var(--color-neutral-700)">' + fmtM(rate) + '/h</strong>' +
-              ' &nbsp;&middot;&nbsp; OT rate: <strong style="color:var(--color-neutral-700)">' + fmtM(otRate) + '/h</strong> (' + OT_MULTIPLIER_DEFAULT + '&times;)'
+              ' &nbsp;&middot;&nbsp; OT rate: <strong style="color:var(--color-neutral-700)">' + fmtM(otRate) + '/h</strong> (' + _otMultiplier + '&times;)'
             : '') +
         '</p>' +
         '<div id="sum-controls" style="margin-bottom:var(--space-5)"></div>' +
@@ -2119,7 +2143,7 @@
           '<div class="form-group"><label for="rpt-to">To</label>' +
             '<input id="rpt-to" class="input" type="date" value="' + defaultTo + '"></div>' +
           '<div class="form-group"><label for="rpt-mult">OT multiplier</label>' +
-            '<input id="rpt-mult" class="input" type="number" min="1" max="4" step="0.25" value="1.5" style="width:5.5rem"></div>' +
+            '<input id="rpt-mult" class="input" type="number" min="1" max="4" step="0.25" value="' + _otMultiplier + '" style="width:5.5rem"></div>' +
           '<div><button class="btn btn--primary" id="gen-btn">Generate</button></div>' +
         '</div>' +
       '</div>' +
@@ -2323,6 +2347,49 @@
     generate(); // auto-generate on load
   }
 
+  // ─── Admin Settings ───────────────────────────────────────────────────────
+  async function adminSettingsRender(root) {
+    var main = renderAdminShell(root, '#/admin/settings', 'Settings');
+
+    main.insertAdjacentHTML('beforeend',
+      '<div class="section-card" style="margin-top:0;max-width:28rem">' +
+        '<h2>Overtime Rules</h2>' +
+        '<p style="font-size:var(--font-size-sm);color:var(--color-neutral-500);margin-bottom:var(--space-5)">Applied globally to My Summary and used as the default in Billing Reports.</p>' +
+        '<div class="form-group">' +
+          '<label for="set-threshold">Weekly OT threshold (hours)</label>' +
+          '<input id="set-threshold" class="input" type="number" min="1" max="80" step="1" value="' + _otThreshold + '" style="max-width:8rem">' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label for="set-multiplier">OT pay multiplier</label>' +
+          '<input id="set-multiplier" class="input" type="number" min="1" max="4" step="0.25" value="' + _otMultiplier + '" style="max-width:8rem">' +
+          '<small style="color:var(--color-neutral-400);display:block;margin-top:var(--space-1)">e.g. 1.5 = time-and-a-half</small>' +
+        '</div>' +
+        '<button class="btn btn--primary" id="save-settings-btn">Save</button>' +
+        '<p id="settings-msg" style="margin-top:var(--space-3);font-size:var(--font-size-sm)"></p>' +
+      '</div>'
+    );
+
+    main.querySelector('#save-settings-btn').addEventListener('click', async function() {
+      var btn       = main.querySelector('#save-settings-btn');
+      var threshold = parseFloat(main.querySelector('#set-threshold').value);
+      var mult      = parseFloat(main.querySelector('#set-multiplier').value);
+      var msg       = main.querySelector('#settings-msg');
+      if (!isFinite(threshold) || threshold < 1) { msg.style.color = 'var(--color-danger)'; msg.textContent = 'Threshold must be at least 1 hour.'; return; }
+      if (!isFinite(mult) || mult < 1)           { msg.style.color = 'var(--color-danger)'; msg.textContent = 'Multiplier must be at least 1.'; return; }
+      btn.disabled = true; btn.textContent = 'Saving…';
+      var r1 = await saveAppSetting('ot_threshold_hours', threshold);
+      var r2 = await saveAppSetting('ot_multiplier',      mult);
+      btn.disabled = false; btn.textContent = 'Save';
+      if (r1.error || r2.error) {
+        msg.style.color = 'var(--color-danger)';
+        msg.textContent = 'Save failed: ' + ((r1.error || r2.error).message);
+      } else {
+        msg.style.color = 'var(--color-success, #15803d)';
+        msg.textContent = 'Saved — new values apply immediately.';
+      }
+    });
+  }
+
   // ─── Router ────────────────────────────────────────────────────────────────
   var routes = [
     { pattern: '#/login',                         role: null,                  render: loginRender                    },
@@ -2337,6 +2404,7 @@
     { pattern: '#/admin/expense-categories',      role: ['admin'],             render: adminExpenseCategoriesRender   },
     { pattern: '#/admin/users',                   role: ['admin'],             render: adminUsersRender               },
     { pattern: '#/admin/billing',                 role: ['admin'],             render: adminBillingRender             },
+    { pattern: '#/admin/settings',               role: ['admin'],             render: adminSettingsRender            },
   ];
 
   function matchRoute(hash, pattern) {
@@ -2391,6 +2459,7 @@
 
   document.addEventListener('DOMContentLoaded', async function () {
     if (_supabase) {
+      await loadAppSettings();
       var sess = await _supabase.auth.getSession();
       if (sess.data && sess.data.session) {
         var profile = await loadProfile(sess.data.session.user);
