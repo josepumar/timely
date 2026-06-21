@@ -151,7 +151,8 @@ create policy "own timesheets"   on timesheets for select using (user_id = auth.
 create policy "admin view all"   on timesheets for select using (is_admin());
 create policy "insert own"       on timesheets for insert with check (user_id = auth.uid());
 create policy "update own draft" on timesheets for update
-  using (user_id = auth.uid() and status in ('draft','rejected'));
+  using  (user_id = auth.uid() and status in ('draft','rejected'))
+  with check (user_id = auth.uid());
 create policy "admin update any" on timesheets for update using (is_admin());
 
 -- timesheet_entries
@@ -175,7 +176,8 @@ create policy "own expenses"     on expenses for select using (user_id = auth.ui
 create policy "admin view all"   on expenses for select using (is_admin());
 create policy "insert own"       on expenses for insert with check (user_id = auth.uid());
 create policy "update own draft" on expenses for update
-  using (user_id = auth.uid() and status = 'draft');
+  using  (user_id = auth.uid() and status = 'draft')
+  with check (user_id = auth.uid());
 create policy "admin update any" on expenses for update using (is_admin());
 create policy "delete own draft" on expenses for delete
   using (user_id = auth.uid() and status = 'draft');
