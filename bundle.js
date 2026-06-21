@@ -321,6 +321,23 @@
     return ok(r.data.map(function(row){ return Object.assign(mapProfile(row), { email: '' }); }));
   }
 
+  async function updateProfile(id, patch) {
+    if (!_supabase) {
+      var u = MOCK_USERS.find(function(u){ return u.id === id; });
+      if (!u) return dbErr('User not found');
+      Object.assign(u, patch);
+      return ok(Object.assign({}, u));
+    }
+    var row = {};
+    if (patch.name        !== undefined) row.name         = patch.name;
+    if (patch.role        !== undefined) row.role         = patch.role;
+    if (patch.hourlyRate  !== undefined) row.hourly_rate  = patch.hourlyRate;
+    if (patch.bankedHours !== undefined) row.banked_hours = patch.bankedHours;
+    var r = await _supabase.from('profiles').update(row).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapProfile(r.data));
+  }
+
   async function getTimesheetForWeek(userId, weekStartIso) {
     if (!_supabase) {
       var ts = _dbTimesheets.find(function(t){ return t.userId === userId && t.weekStart === weekStartIso; }) || null;
@@ -1339,28 +1356,88 @@
 
   // ─── Admin Users ───────────────────────────────────────────────────────────
   async function adminUsersRender(root) {
-    var main   = renderAdminShell(root, '#/admin/users', 'Users & Roles');
-    var result = await getUsers();
-    if (result.error) { main.insertAdjacentHTML('beforeend', '<p style="color:var(--color-danger)">Failed to load users.</p>'); return; }
-    var rows = (result.data || []).map(function(u) {
-      var banked = u.bankedHours != null ? (u.bankedHours > 0 ? '+' : '') + Number(u.bankedHours).toFixed(1) + ' h' : '—';
-      var rate   = u.hourlyRate > 0
-        ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(u.hourlyRate) + '/h'
-        : '<span style="color:var(--color-neutral-400)">—</span>';
-      return '<tr>' +
-        '<td data-label="Name"><strong>' + esc(u.name) + '</strong></td>' +
-        '<td data-label="Email">' + esc(u.email) + '</td>' +
-        '<td data-label="Role"><span class="badge badge--' + (u.role === 'admin' ? 'submitted' : 'draft') + '">' + (u.role === 'admin' ? 'Admin' : 'Employee') + '</span></td>' +
-        '<td data-label="Hourly Rate" style="text-align:right">' + rate + '</td>' +
-        '<td data-label="Banked Hours" style="text-align:right">' + banked + '</td>' +
-      '</tr>';
-    }).join('');
+    var main       = renderAdminShell(root, '#/admin/users', 'Users & Roles');
+    var _editingId = null;
+    var _users     = [];
+    var fmtM       = function(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0); };
+
+    function renderTable() {
+      var rows = _users.map(function(u) {
+        if (u.id === _editingId) {
+          return '<tr>' +
+            '<td data-label="Name"><input id="edit-name" class="input input--sm" value="' + esc(u.name) + '" style="width:100%;min-width:7rem"></td>' +
+            '<td data-label="Email" style="color:var(--color-neutral-400)">' + esc(u.email || '—') + '</td>' +
+            '<td data-label="Role">' +
+              '<select id="edit-role" class="input input--select input--sm">' +
+                '<option value="employee"' + (u.role === 'employee' ? ' selected' : '') + '>Employee</option>' +
+                '<option value="admin"'    + (u.role === 'admin'    ? ' selected' : '') + '>Admin</option>' +
+              '</select>' +
+            '</td>' +
+            '<td data-label="Hourly Rate" style="text-align:right">' +
+              '<input id="edit-rate" class="input input--sm" type="number" min="0" step="0.01" value="' + (u.hourlyRate || 0) + '" style="width:6rem;text-align:right">' +
+            '</td>' +
+            '<td data-label="Banked Hours" style="text-align:right">' +
+              '<input id="edit-banked" class="input input--sm" type="number" step="0.5" value="' + (u.bankedHours || 0) + '" style="width:6rem;text-align:right">' +
+            '</td>' +
+            '<td style="white-space:nowrap">' +
+              '<button class="btn btn--sm btn--primary save-edit-btn" data-id="' + esc(u.id) + '">Save</button>' +
+              '<button class="btn btn--sm btn--ghost cancel-edit-btn" style="margin-left:var(--space-1)">Cancel</button>' +
+            '</td>' +
+          '</tr>';
+        }
+        return '<tr>' +
+          '<td data-label="Name"><strong>' + esc(u.name) + '</strong></td>' +
+          '<td data-label="Email" style="color:var(--color-neutral-400)">' + esc(u.email || '—') + '</td>' +
+          '<td data-label="Role"><span class="badge badge--' + (u.role === 'admin' ? 'submitted' : 'draft') + '">' + (u.role === 'admin' ? 'Admin' : 'Employee') + '</span></td>' +
+          '<td data-label="Hourly Rate" style="text-align:right">' + (u.hourlyRate > 0 ? fmtM(u.hourlyRate) + '/h' : '<span style="color:var(--color-neutral-400)">—</span>') + '</td>' +
+          '<td data-label="Banked Hours" style="text-align:right">' + (u.bankedHours != null ? (u.bankedHours > 0 ? '+' : '') + Number(u.bankedHours).toFixed(1) + ' h' : '—') + '</td>' +
+          '<td><button class="btn btn--sm btn--secondary edit-btn" data-id="' + esc(u.id) + '">Edit</button></td>' +
+        '</tr>';
+      }).join('');
+      main.querySelector('#users-tbody').innerHTML = rows;
+      if (_editingId) { var el = main.querySelector('#edit-name'); if (el) el.focus(); }
+    }
+
     main.insertAdjacentHTML('beforeend',
-      '<p style="color:var(--color-neutral-500);font-size:var(--font-size-sm);margin-bottom:var(--space-4)">To change a role or hourly rate, edit the <code>profiles</code> table in Supabase (Phase 2).</p>' +
       '<div class="table-wrapper"><table class="data-table" aria-label="Users and roles">' +
-        '<thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col" style="text-align:right">Hourly Rate</th><th scope="col" style="text-align:right">Banked Hours</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody></table></div>'
+        '<thead><tr>' +
+          '<th scope="col">Name</th>' +
+          '<th scope="col">Email</th>' +
+          '<th scope="col">Role</th>' +
+          '<th scope="col" style="text-align:right">Hourly Rate</th>' +
+          '<th scope="col" style="text-align:right">Banked Hours</th>' +
+          '<th scope="col"><span class="sr-only">Actions</span></th>' +
+        '</tr></thead>' +
+        '<tbody id="users-tbody"><tr><td colspan="6" style="text-align:center;color:var(--color-neutral-400);padding:var(--space-8)">Loading…</td></tr></tbody>' +
+      '</table></div>'
     );
+
+    main.querySelector('#users-tbody').addEventListener('click', async function(e) {
+      var editBtn   = e.target.closest('.edit-btn');
+      var cancelBtn = e.target.closest('.cancel-edit-btn');
+      var saveBtn   = e.target.closest('.save-edit-btn');
+      if (editBtn)   { _editingId = editBtn.dataset.id; renderTable(); return; }
+      if (cancelBtn) { _editingId = null; renderTable(); return; }
+      if (saveBtn) {
+        var nameVal   = (main.querySelector('#edit-name')   || {}).value || '';
+        var roleVal   = (main.querySelector('#edit-role')   || {}).value || 'employee';
+        var rateVal   = parseFloat((main.querySelector('#edit-rate')   || {}).value) || 0;
+        var bankedVal = parseFloat((main.querySelector('#edit-banked') || {}).value) || 0;
+        if (!nameVal.trim()) { showToast('Name is required.', 'error'); return; }
+        var upd = await updateProfile(saveBtn.dataset.id, { name: nameVal.trim(), role: roleVal, hourlyRate: rateVal, bankedHours: bankedVal });
+        if (upd.error) { showToast('Update failed: ' + upd.error.message, 'error'); return; }
+        var idx = _users.findIndex(function(u){ return u.id === saveBtn.dataset.id; });
+        if (idx !== -1) _users[idx] = Object.assign(_users[idx], upd.data);
+        _editingId = null;
+        renderTable();
+        showToast('Profile updated.', 'success');
+      }
+    });
+
+    var result = await getUsers();
+    if (result.error) { main.querySelector('#users-tbody').innerHTML = '<tr><td colspan="6" style="color:var(--color-danger);padding:var(--space-4)">Failed to load users.</td></tr>'; return; }
+    _users = result.data || [];
+    renderTable();
   }
 
   // ─── Employee Summary ─────────────────────────────────────────────────────

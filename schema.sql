@@ -121,7 +121,7 @@ drop policy if exists "admin view all"  on profiles;
 drop policy if exists "admin update"    on profiles;
 create policy "own profile"    on profiles for select using (id = auth.uid());
 create policy "admin view all" on profiles for select using (is_admin());
-create policy "admin update"   on profiles for update using (is_admin());
+create policy "admin update"   on profiles for update using (is_admin()) with check (is_admin());
 
 -- charge_codes
 drop policy if exists "auth read"    on charge_codes;
