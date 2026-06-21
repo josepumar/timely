@@ -45,6 +45,8 @@
   // ─── Config ───────────────────────────────────────────────────────────────
   const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
+
+  const VERSION = '0.1';
   const OT_THRESHOLD_HOURS = 40;
   const WEEK_START_DAY        = 6;   // Saturday
   const OT_MULTIPLIER_DEFAULT = 1.5; // Used for employee-facing earnings display
@@ -712,6 +714,7 @@
               'Signed in as<br><strong style="color:var(--color-neutral-200)">' + esc(user ? user.name : '') + '</strong>' +
             '</div>' +
             '<button class="btn btn--ghost btn--sm" id="logout-btn" style="color:var(--color-neutral-400);padding-left:0">← Sign Out</button>' +
+            '<div style="font-size:var(--font-size-xs);color:var(--color-neutral-600);margin-top:var(--space-3)">v' + VERSION + '</div>' +
           '</div>' +
         '</nav>' +
         '<main class="admin-main" id="admin-content">' +
@@ -751,6 +754,7 @@
           '<p style="margin-top:1.5rem;font-size:0.8rem;color:var(--color-neutral-400);text-align:center">' +
             'Demo: alice@example.com / pass &nbsp;|&nbsp; admin@example.com / pass' +
           '</p>' +
+          '<p style="margin-top:0.5rem;font-size:0.75rem;color:var(--color-neutral-300);text-align:center">v' + VERSION + '</p>' +
         '</div>' +
       '</div>';
 
