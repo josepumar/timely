@@ -49,11 +49,9 @@
   const VERSION = '0.2';
   const OT_THRESHOLD_HOURS    = 40;
   const WEEK_START_DAY        = 6;
-  const _otMultiplier = 1.5;
-
   // Runtime values — overwritten by loadAppSettings() on startup
   var _otThreshold  = OT_THRESHOLD_HOURS;
-  var _otMultiplier = _otMultiplier;
+  var _otMultiplier = 1.5;
 
   // ─── Supabase Client ──────────────────────────────────────────────────────
   // Null when URL is empty — app falls back to mock auth/data (Phase 1 behaviour).
