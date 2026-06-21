@@ -43,11 +43,17 @@
   const DAY_LABELS = ['SAT', 'SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI'];
 
   // ─── Config ───────────────────────────────────────────────────────────────
-  const SUPABASE_URL      = '';   // filled in Phase 2
-  const SUPABASE_ANON_KEY = '';   // filled in Phase 2
+  const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
   const OT_THRESHOLD_HOURS = 40;
   const WEEK_START_DAY        = 6;   // Saturday
   const OT_MULTIPLIER_DEFAULT = 1.5; // Used for employee-facing earnings display
+
+  // ─── Supabase Client ──────────────────────────────────────────────────────
+  // Null when URL is empty — app falls back to mock auth/data (Phase 1 behaviour).
+  var _supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null;
 
   // ─── Calc ─────────────────────────────────────────────────────────────────
   function mround(value, multiple) {
@@ -115,17 +121,47 @@
 
   let _currentUser = null;
 
-  function login(email, password) {
-    const user = MOCK_USERS.find(
-      u => u.email.toLowerCase() === email.toLowerCase() && u.password === password
-    );
-    if (user) { _currentUser = user; return user; }
+  async function login(email, password) {
+    if (!_supabase) {
+      // Mock fallback when Supabase is not configured
+      var user = MOCK_USERS.find(function(u) {
+        return u.email.toLowerCase() === email.toLowerCase() && u.password === password;
+      });
+      if (user) { _currentUser = user; return user; }
+      return null;
+    }
+    var r = await _supabase.auth.signInWithPassword({ email: email, password: password });
+    if (r.error || !r.data.user) return null;
+    var profile = await loadProfile(r.data.user);
+    if (profile) { _currentUser = profile; return profile; }
     return null;
   }
 
-  function logout() { _currentUser = null; }
+  function logout() {
+    _currentUser = null;
+    if (_supabase) _supabase.auth.signOut(); // fire-and-forget; router navigates immediately
+  }
 
   function currentUser() { return _currentUser; }
+
+  async function loadProfile(authUser) {
+    if (!_supabase) return null;
+    var r = await _supabase
+      .from('profiles')
+      .select('id, name, role, hourly_rate, banked_hours')
+      .eq('id', authUser.id)
+      .single();
+    if (r.error || !r.data) return null;
+    var d = r.data;
+    return {
+      id: d.id,
+      email: authUser.email,
+      role: d.role,
+      name: d.name,
+      hourlyRate:   d.hourly_rate  || 0,
+      bankedHours:  d.banked_hours || 0
+    };
+  }
 
   // ─── Navigate + Toast (defined early so views can reference them) ─────────
   function navigate(hash) {
@@ -515,14 +551,17 @@
 
     root.querySelector('#email').focus();
 
-    root.querySelector('#login-form').addEventListener('submit', function (e) {
+    root.querySelector('#login-form').addEventListener('submit', async function (e) {
       e.preventDefault();
-      var errorEl  = root.querySelector('#login-error');
-      var email    = root.querySelector('#email').value.trim();
-      var password = root.querySelector('#password').value;
+      var errorEl   = root.querySelector('#login-error');
+      var email     = root.querySelector('#email').value.trim();
+      var password  = root.querySelector('#password').value;
       errorEl.textContent = '';
       if (!email || !password) { errorEl.textContent = 'Please enter your email and password.'; return; }
-      var user = login(email, password);
+      var submitBtn = e.target.querySelector('button[type="submit"]');
+      submitBtn.disabled = true; submitBtn.textContent = 'Signing in…';
+      var user = await login(email, password);
+      submitBtn.disabled = false; submitBtn.textContent = 'Sign In';
       if (!user) {
         errorEl.textContent = 'Invalid email or password.';
         root.querySelector('#password').value = '';
@@ -2047,7 +2086,14 @@
     dispatch(hash);
   });
 
-  document.addEventListener('DOMContentLoaded', function () {
+  document.addEventListener('DOMContentLoaded', async function () {
+    if (_supabase) {
+      var sess = await _supabase.auth.getSession();
+      if (sess.data && sess.data.session) {
+        var profile = await loadProfile(sess.data.session.user);
+        if (profile) _currentUser = profile;
+      }
+    }
     dispatch(window.location.hash || '#/login');
   });
 
