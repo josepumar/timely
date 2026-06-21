@@ -46,7 +46,7 @@
   const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
 
-  const VERSION = '0.1';
+  const VERSION = '0.2';
   const OT_THRESHOLD_HOURS = 40;
   const WEEK_START_DAY        = 6;   // Saturday
   const OT_MULTIPLIER_DEFAULT = 1.5; // Used for employee-facing earnings display
