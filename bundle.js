@@ -255,193 +255,398 @@
   function ok(data)  { return Promise.resolve({ data: data, error: null }); }
   function dbErr(msg){ return Promise.resolve({ data: null, error: new Error(msg) }); }
 
-  function getChargeCodes()         { return ok(_dbChargeCodes.map(function(c){ return Object.assign({}, c); })); }
-  function createChargeCode(cc)     {
-    var c = { id: dbNewId(), code: cc.code.trim(), description: cc.description.trim(), active: true };
-    _dbChargeCodes.push(c);
-    return ok(Object.assign({}, c));
+  function mapTimesheet(r) {
+    return { id: r.id, userId: r.user_id, weekStart: r.week_start, status: r.status,
+             submittedAt: r.submitted_at, approvedBy: r.approved_by,
+             approvedAt: r.approved_at, rejectionReason: r.rejection_reason };
   }
-  function updateChargeCode(id, patch) {
-    var idx = _dbChargeCodes.findIndex(function(c){ return c.id === id; });
-    if (idx === -1) return dbErr('Charge code not found');
-    _dbChargeCodes[idx] = Object.assign({}, _dbChargeCodes[idx], patch);
-    return ok(Object.assign({}, _dbChargeCodes[idx]));
+  function mapEntry(r) {
+    return { id: r.id, timesheetId: r.timesheet_id, dayOffset: r.day_offset,
+             timeIn: r.time_in || '', timeOut: r.time_out || '',
+             chargeCodeId: r.charge_code_id, remark: r.remark || '' };
+  }
+  function mapExpense(r) {
+    return { id: r.id, userId: r.user_id, date: r.date, categoryId: r.category_id,
+             amount: r.amount, description: r.description, receiptRef: r.receipt_ref || '',
+             status: r.status, submittedAt: r.submitted_at, approvedBy: r.approved_by,
+             approvedAt: r.approved_at, rejectionReason: r.rejection_reason };
+  }
+  function mapProfile(r) {
+    return { id: r.id, name: r.name, role: r.role,
+             hourlyRate: r.hourly_rate || 0, bankedHours: r.banked_hours || 0 };
+  }
+
+  async function getChargeCodes() {
+    if (!_supabase) { return ok(_dbChargeCodes.map(function(c){ return Object.assign({}, c); })); }
+    var r = await _supabase.from('charge_codes').select('*').order('name');
+    if (r.error) return dbErr(r.error.message);
+    return ok(r.data.map(function(row){ return { id: row.id, code: row.name, description: row.description, active: row.active }; }));
+  }
+  async function createChargeCode(cc) {
+    if (!_supabase) {
+      var c = { id: dbNewId(), code: cc.code.trim(), description: cc.description.trim(), active: true };
+      _dbChargeCodes.push(c);
+      return ok(Object.assign({}, c));
+    }
+    var r = await _supabase.from('charge_codes').insert({ name: cc.code.trim(), description: cc.description.trim() }).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok({ id: r.data.id, code: r.data.name, description: r.data.description, active: r.data.active });
+  }
+  async function updateChargeCode(id, patch) {
+    if (!_supabase) {
+      var idx = _dbChargeCodes.findIndex(function(c){ return c.id === id; });
+      if (idx === -1) return dbErr('Charge code not found');
+      _dbChargeCodes[idx] = Object.assign({}, _dbChargeCodes[idx], patch);
+      return ok(Object.assign({}, _dbChargeCodes[idx]));
+    }
+    var update = {};
+    if (patch.code        !== undefined) update.name        = patch.code;
+    if (patch.description !== undefined) update.description = patch.description;
+    if (patch.active      !== undefined) update.active      = patch.active;
+    var r = await _supabase.from('charge_codes').update(update).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok({ id: r.data.id, code: r.data.name, description: r.data.description, active: r.data.active });
   }
   function deactivateChargeCode(id)  { return updateChargeCode(id, { active: false }); }
   function reactivateChargeCode(id)  { return updateChargeCode(id, { active: true });  }
 
-  function getUsers() {
-    return ok(MOCK_USERS.map(function(u){ var copy = Object.assign({}, u); delete copy.password; return copy; }));
-  }
-
-  function getTimesheetForWeek(userId, weekStartIso) {
-    var ts = _dbTimesheets.find(function(t){ return t.userId === userId && t.weekStart === weekStartIso; }) || null;
-    if (!ts) return ok({ timesheet: null, entries: [] });
-    var entries = _dbEntries.filter(function(e){ return e.timesheetId === ts.id; }).map(function(e){ return Object.assign({}, e); });
-    return ok({ timesheet: Object.assign({}, ts), entries: entries });
-  }
-
-  function getSubmittedTimesheets() {
-    var submitted = _dbTimesheets.filter(function(t){ return t.status === 'submitted'; });
-    var result = submitted.map(function(ts) {
-      var user    = MOCK_USERS.find(function(u){ return u.id === ts.userId; });
-      var entries = _dbEntries.filter(function(e){ return e.timesheetId === ts.id; });
-      var totals  = weeklyTotals(entries);
-      return { timesheet: Object.assign({}, ts), userName: user ? user.name : 'Unknown', totalHours: totals.total };
-    });
-    result.sort(function(a, b){ return (b.timesheet.submittedAt || '').localeCompare(a.timesheet.submittedAt || ''); });
-    return ok(result);
-  }
-
-  function getTimesheetById(id) {
-    var ts = _dbTimesheets.find(function(t){ return t.id === id; });
-    if (!ts) return dbErr('Timesheet not found');
-    var user    = MOCK_USERS.find(function(u){ return u.id === ts.userId; });
-    var entries = _dbEntries.filter(function(e){ return e.timesheetId === id; }).map(function(e){ return Object.assign({}, e); });
-    var totals  = weeklyTotals(entries);
-    return ok({ timesheet: Object.assign({}, ts), user: user || null, entries: entries, totals: totals });
-  }
-
-  function saveTimesheet(userId, weekStartIso, entries) {
-    var ts = _dbTimesheets.find(function(t){ return t.userId === userId && t.weekStart === weekStartIso; });
-    if (!ts) {
-      ts = { id: dbNewId(), userId: userId, weekStart: weekStartIso, status: 'draft',
-             submittedAt: null, approvedBy: null, approvedAt: null, rejectionReason: null };
-      _dbTimesheets.push(ts);
+  async function getUsers() {
+    if (!_supabase) {
+      return ok(MOCK_USERS.map(function(u){ var copy = Object.assign({}, u); delete copy.password; return copy; }));
     }
-    _dbEntries = _dbEntries.filter(function(e){ return e.timesheetId !== ts.id; });
-    var newEntries = entries.map(function(e){
-      return Object.assign({}, e, { id: e.id || dbNewId(), timesheetId: ts.id });
+    var r = await _supabase.from('profiles').select('id, name, role, hourly_rate, banked_hours').order('name');
+    if (r.error) return dbErr(r.error.message);
+    return ok(r.data.map(function(row){ return Object.assign(mapProfile(row), { email: '' }); }));
+  }
+
+  async function getTimesheetForWeek(userId, weekStartIso) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.userId === userId && t.weekStart === weekStartIso; }) || null;
+      if (!ts) return ok({ timesheet: null, entries: [] });
+      var entries = _dbEntries.filter(function(e){ return e.timesheetId === ts.id; }).map(function(e){ return Object.assign({}, e); });
+      return ok({ timesheet: Object.assign({}, ts), entries: entries });
+    }
+    var r = await _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('user_id', userId).eq('week_start', weekStartIso).maybeSingle();
+    if (r.error) return dbErr(r.error.message);
+    if (!r.data) return ok({ timesheet: null, entries: [] });
+    return ok({ timesheet: mapTimesheet(r.data), entries: (r.data.timesheet_entries || []).map(mapEntry) });
+  }
+
+  async function getSubmittedTimesheets() {
+    if (!_supabase) {
+      var submitted = _dbTimesheets.filter(function(t){ return t.status === 'submitted'; });
+      var result = submitted.map(function(ts) {
+        var user    = MOCK_USERS.find(function(u){ return u.id === ts.userId; });
+        var entries = _dbEntries.filter(function(e){ return e.timesheetId === ts.id; });
+        var totals  = weeklyTotals(entries);
+        return { timesheet: Object.assign({}, ts), userName: user ? user.name : 'Unknown', totalHours: totals.total };
+      });
+      result.sort(function(a, b){ return (b.timesheet.submittedAt || '').localeCompare(a.timesheet.submittedAt || ''); });
+      return ok(result);
+    }
+    var r = await _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('status', 'submitted').order('submitted_at', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    var userIds = r.data.map(function(row){ return row.user_id; }).filter(function(id, i, arr){ return arr.indexOf(id) === i; });
+    var pr = userIds.length ? await _supabase.from('profiles').select('id, name').in('id', userIds) : { data: [], error: null };
+    if (pr.error) return dbErr(pr.error.message);
+    var profileMap = {};
+    (pr.data || []).forEach(function(p){ profileMap[p.id] = p.name; });
+    return ok(r.data.map(function(row){
+      var entries = (row.timesheet_entries || []).map(mapEntry);
+      return { timesheet: mapTimesheet(row), userName: profileMap[row.user_id] || 'Unknown', totalHours: weeklyTotals(entries).total };
+    }));
+  }
+
+  async function getTimesheetById(id) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.id === id; });
+      if (!ts) return dbErr('Timesheet not found');
+      var user    = MOCK_USERS.find(function(u){ return u.id === ts.userId; });
+      var entries = _dbEntries.filter(function(e){ return e.timesheetId === id; }).map(function(e){ return Object.assign({}, e); });
+      var totals  = weeklyTotals(entries);
+      return ok({ timesheet: Object.assign({}, ts), user: user || null, entries: entries, totals: totals });
+    }
+    var r = await _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('id', id).single();
+    if (r.error) return dbErr(r.error.message);
+    var pr = await _supabase.from('profiles').select('id, name, role, hourly_rate, banked_hours').eq('id', r.data.user_id).single();
+    if (pr.error) return dbErr(pr.error.message);
+    var entries = (r.data.timesheet_entries || []).map(mapEntry);
+    return ok({ timesheet: mapTimesheet(r.data), user: mapProfile(pr.data), entries: entries, totals: weeklyTotals(entries) });
+  }
+
+  async function saveTimesheet(userId, weekStartIso, entries) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.userId === userId && t.weekStart === weekStartIso; });
+      if (!ts) {
+        ts = { id: dbNewId(), userId: userId, weekStart: weekStartIso, status: 'draft',
+               submittedAt: null, approvedBy: null, approvedAt: null, rejectionReason: null };
+        _dbTimesheets.push(ts);
+      }
+      _dbEntries = _dbEntries.filter(function(e){ return e.timesheetId !== ts.id; });
+      var newEntries = entries.map(function(e){
+        return Object.assign({}, e, { id: e.id || dbNewId(), timesheetId: ts.id });
+      });
+      _dbEntries = _dbEntries.concat(newEntries);
+      return ok({ timesheet: Object.assign({}, ts), entries: newEntries });
+    }
+    var tsRes = await _supabase.from('timesheets').select('id, status').eq('user_id', userId).eq('week_start', weekStartIso).maybeSingle();
+    if (tsRes.error) return dbErr(tsRes.error.message);
+    var tsId;
+    if (tsRes.data) {
+      tsId = tsRes.data.id;
+    } else {
+      var ins = await _supabase.from('timesheets').insert({ user_id: userId, week_start: weekStartIso, status: 'draft' }).select('id').single();
+      if (ins.error) return dbErr(ins.error.message);
+      tsId = ins.data.id;
+    }
+    var del = await _supabase.from('timesheet_entries').delete().eq('timesheet_id', tsId);
+    if (del.error) return dbErr(del.error.message);
+    var newRows = entries.map(function(e){
+      return { timesheet_id: tsId, day_offset: e.dayOffset, time_in: e.timeIn, time_out: e.timeOut,
+               charge_code_id: e.chargeCodeId || null, remark: e.remark || '' };
     });
-    _dbEntries = _dbEntries.concat(newEntries);
-    return ok({ timesheet: Object.assign({}, ts), entries: newEntries });
+    if (newRows.length) {
+      var insE = await _supabase.from('timesheet_entries').insert(newRows).select();
+      if (insE.error) return dbErr(insE.error.message);
+    }
+    var tsGet = await _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('id', tsId).single();
+    if (tsGet.error) return dbErr(tsGet.error.message);
+    return ok({ timesheet: mapTimesheet(tsGet.data), entries: (tsGet.data.timesheet_entries || []).map(mapEntry) });
   }
 
-  function submitTimesheet(timesheetId) {
-    var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
-    if (!ts) return dbErr('Timesheet not found');
-    if (ts.status !== 'draft' && ts.status !== 'rejected') return dbErr('Cannot submit in current state');
-    ts.status = 'submitted';
-    ts.submittedAt = new Date().toISOString();
-    ts.rejectionReason = null;
-    return ok(Object.assign({}, ts));
+  async function submitTimesheet(timesheetId) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
+      if (!ts) return dbErr('Timesheet not found');
+      if (ts.status !== 'draft' && ts.status !== 'rejected') return dbErr('Cannot submit in current state');
+      ts.status = 'submitted';
+      ts.submittedAt = new Date().toISOString();
+      ts.rejectionReason = null;
+      return ok(Object.assign({}, ts));
+    }
+    var r = await _supabase.from('timesheets').update({ status: 'submitted', submitted_at: new Date().toISOString(), rejection_reason: null }).eq('id', timesheetId).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapTimesheet(r.data));
   }
 
-  function approveTimesheet(timesheetId, adminUserId) {
-    var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
-    if (!ts) return dbErr('Timesheet not found');
-    ts.status = 'approved';
-    ts.approvedBy = adminUserId || null;
-    ts.approvedAt = new Date().toISOString();
-    return ok(Object.assign({}, ts));
+  async function approveTimesheet(timesheetId, adminUserId) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
+      if (!ts) return dbErr('Timesheet not found');
+      ts.status = 'approved';
+      ts.approvedBy = adminUserId || null;
+      ts.approvedAt = new Date().toISOString();
+      return ok(Object.assign({}, ts));
+    }
+    var r = await _supabase.from('timesheets').update({ status: 'approved', approved_by: adminUserId || null, approved_at: new Date().toISOString() }).eq('id', timesheetId).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapTimesheet(r.data));
   }
 
-  function rejectTimesheet(timesheetId, reason) {
-    var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
-    if (!ts) return dbErr('Timesheet not found');
-    ts.status = 'rejected';
-    ts.rejectionReason = reason;
-    return ok(Object.assign({}, ts));
+  async function rejectTimesheet(timesheetId, reason) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
+      if (!ts) return dbErr('Timesheet not found');
+      ts.status = 'rejected';
+      ts.rejectionReason = reason;
+      return ok(Object.assign({}, ts));
+    }
+    var r = await _supabase.from('timesheets').update({ status: 'rejected', rejection_reason: reason }).eq('id', timesheetId).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapTimesheet(r.data));
+  }
+
+  async function getTimesheetsByUser(userId) {
+    if (!_supabase) {
+      var sheets = _dbTimesheets.filter(function(ts){ return ts.userId === userId && ts.status !== 'draft'; });
+      return ok(sheets.map(function(ts){
+        return { timesheet: ts, entries: _dbEntries.filter(function(e){ return e.timesheetId === ts.id; }) };
+      }));
+    }
+    var r = await _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('user_id', userId).neq('status', 'draft').order('week_start', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    return ok(r.data.map(function(row){
+      return { timesheet: mapTimesheet(row), entries: (row.timesheet_entries || []).map(mapEntry) };
+    }));
   }
 
   // ─── Expense DB Functions ─────────────────────────────────────────────────
-  function getExpenseCategories() { return ok(_dbExpenseCategories.map(function(c){ return Object.assign({}, c); })); }
-
-  function createExpenseCategory(cat) {
-    var c = { id: dbNewId(), name: cat.name.trim(), description: cat.description.trim(), active: true };
-    _dbExpenseCategories.push(c);
-    return ok(Object.assign({}, c));
+  async function getExpenseCategories() {
+    if (!_supabase) { return ok(_dbExpenseCategories.map(function(c){ return Object.assign({}, c); })); }
+    var r = await _supabase.from('expense_categories').select('*').order('name');
+    if (r.error) return dbErr(r.error.message);
+    return ok(r.data.map(function(row){ return { id: row.id, name: row.name, description: row.description, active: row.active }; }));
   }
 
-  function updateExpenseCategory(id, patch) {
-    var idx = _dbExpenseCategories.findIndex(function(c){ return c.id === id; });
-    if (idx === -1) return dbErr('Category not found');
-    _dbExpenseCategories[idx] = Object.assign({}, _dbExpenseCategories[idx], patch);
-    return ok(Object.assign({}, _dbExpenseCategories[idx]));
+  async function createExpenseCategory(cat) {
+    if (!_supabase) {
+      var c = { id: dbNewId(), name: cat.name.trim(), description: cat.description.trim(), active: true };
+      _dbExpenseCategories.push(c);
+      return ok(Object.assign({}, c));
+    }
+    var r = await _supabase.from('expense_categories').insert({ name: cat.name.trim(), description: cat.description.trim() }).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok({ id: r.data.id, name: r.data.name, description: r.data.description, active: r.data.active });
+  }
+
+  async function updateExpenseCategory(id, patch) {
+    if (!_supabase) {
+      var idx = _dbExpenseCategories.findIndex(function(c){ return c.id === id; });
+      if (idx === -1) return dbErr('Category not found');
+      _dbExpenseCategories[idx] = Object.assign({}, _dbExpenseCategories[idx], patch);
+      return ok(Object.assign({}, _dbExpenseCategories[idx]));
+    }
+    var r = await _supabase.from('expense_categories').update(patch).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok({ id: r.data.id, name: r.data.name, description: r.data.description, active: r.data.active });
   }
 
   function deactivateExpenseCategory(id) { return updateExpenseCategory(id, { active: false }); }
   function reactivateExpenseCategory(id) { return updateExpenseCategory(id, { active: true });  }
 
-  function getExpensesByUser(userId) {
-    var list = _dbExpenses
-      .filter(function(e){ return e.userId === userId; })
-      .sort(function(a, b){ return b.date.localeCompare(a.date); })
-      .map(function(e){
-        var cat = _dbExpenseCategories.find(function(c){ return c.id === e.categoryId; });
-        return Object.assign({}, e, { categoryName: cat ? cat.name : '—' });
-      });
-    return ok(list);
-  }
-
-  function getPendingExpenses() {
-    var list = _dbExpenses
-      .filter(function(e){ return e.status === 'submitted'; })
-      .sort(function(a, b){ return (b.submittedAt || '').localeCompare(a.submittedAt || ''); })
-      .map(function(e){
-        var u   = MOCK_USERS.find(function(u){ return u.id === e.userId; });
-        var cat = _dbExpenseCategories.find(function(c){ return c.id === e.categoryId; });
-        return Object.assign({}, e, { userName: u ? u.name : 'Unknown', categoryName: cat ? cat.name : '—' });
-      });
-    return ok(list);
-  }
-
-  function getExpenseById(id) {
-    var e = _dbExpenses.find(function(x){ return x.id === id; });
-    if (!e) return dbErr('Expense not found');
-    var u   = MOCK_USERS.find(function(u){ return u.id === e.userId; });
-    var cat = _dbExpenseCategories.find(function(c){ return c.id === e.categoryId; });
-    return ok(Object.assign({}, e, { user: u || null, categoryName: cat ? cat.name : '—' }));
-  }
-
-  function saveExpense(userId, data) {
-    if (data.id) {
-      var idx = _dbExpenses.findIndex(function(e){ return e.id === data.id; });
-      if (idx !== -1) {
-        _dbExpenses[idx] = Object.assign({}, _dbExpenses[idx], data);
-        return ok(Object.assign({}, _dbExpenses[idx]));
-      }
+  async function getExpensesByUser(userId) {
+    if (!_supabase) {
+      var list = _dbExpenses
+        .filter(function(e){ return e.userId === userId; })
+        .sort(function(a, b){ return b.date.localeCompare(a.date); })
+        .map(function(e){
+          var cat = _dbExpenseCategories.find(function(c){ return c.id === e.categoryId; });
+          return Object.assign({}, e, { categoryName: cat ? cat.name : '—' });
+        });
+      return ok(list);
     }
-    var newExp = Object.assign({
-      id: dbNewId(), userId: userId,
-      status: 'draft', submittedAt: null,
-      approvedBy: null, approvedAt: null, rejectionReason: null
-    }, data);
-    _dbExpenses.push(newExp);
-    return ok(Object.assign({}, newExp));
+    var r = await _supabase.from('expenses').select('*, expense_categories(name)').eq('user_id', userId).order('date', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    return ok(r.data.map(function(row){
+      return Object.assign(mapExpense(row), { categoryName: (row.expense_categories && row.expense_categories.name) || '—' });
+    }));
   }
 
-  function submitExpense(id) {
-    var e = _dbExpenses.find(function(x){ return x.id === id; });
-    if (!e) return dbErr('Expense not found');
-    if (e.status !== 'draft' && e.status !== 'rejected') return dbErr('Cannot submit in current state');
-    e.status = 'submitted';
-    e.submittedAt = new Date().toISOString();
-    e.rejectionReason = null;
-    return ok(Object.assign({}, e));
+  async function getPendingExpenses() {
+    if (!_supabase) {
+      var list = _dbExpenses
+        .filter(function(e){ return e.status === 'submitted'; })
+        .sort(function(a, b){ return (b.submittedAt || '').localeCompare(a.submittedAt || ''); })
+        .map(function(e){
+          var u   = MOCK_USERS.find(function(u){ return u.id === e.userId; });
+          var cat = _dbExpenseCategories.find(function(c){ return c.id === e.categoryId; });
+          return Object.assign({}, e, { userName: u ? u.name : 'Unknown', categoryName: cat ? cat.name : '—' });
+        });
+      return ok(list);
+    }
+    var r = await _supabase.from('expenses').select('*, expense_categories(name)').eq('status', 'submitted').order('submitted_at', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    var userIds = r.data.map(function(row){ return row.user_id; }).filter(function(id, i, arr){ return arr.indexOf(id) === i; });
+    var pr = userIds.length ? await _supabase.from('profiles').select('id, name').in('id', userIds) : { data: [], error: null };
+    if (pr.error) return dbErr(pr.error.message);
+    var profileMap = {};
+    (pr.data || []).forEach(function(p){ profileMap[p.id] = p.name; });
+    return ok(r.data.map(function(row){
+      return Object.assign(mapExpense(row), {
+        userName: profileMap[row.user_id] || 'Unknown',
+        categoryName: (row.expense_categories && row.expense_categories.name) || '—'
+      });
+    }));
   }
 
-  function approveExpense(id, adminUserId) {
-    var e = _dbExpenses.find(function(x){ return x.id === id; });
-    if (!e) return dbErr('Expense not found');
-    e.status = 'approved';
-    e.approvedBy = adminUserId || null;
-    e.approvedAt = new Date().toISOString();
-    return ok(Object.assign({}, e));
+  async function getExpenseById(id) {
+    if (!_supabase) {
+      var e = _dbExpenses.find(function(x){ return x.id === id; });
+      if (!e) return dbErr('Expense not found');
+      var u   = MOCK_USERS.find(function(u){ return u.id === e.userId; });
+      var cat = _dbExpenseCategories.find(function(c){ return c.id === e.categoryId; });
+      return ok(Object.assign({}, e, { user: u || null, categoryName: cat ? cat.name : '—' }));
+    }
+    var r = await _supabase.from('expenses').select('*, expense_categories(name)').eq('id', id).single();
+    if (r.error) return dbErr(r.error.message);
+    var pr = await _supabase.from('profiles').select('id, name, role, hourly_rate, banked_hours').eq('id', r.data.user_id).single();
+    if (pr.error) return dbErr(pr.error.message);
+    return ok(Object.assign(mapExpense(r.data), {
+      user: mapProfile(pr.data),
+      categoryName: (r.data.expense_categories && r.data.expense_categories.name) || '—'
+    }));
   }
 
-  function rejectExpense(id, reason) {
-    var e = _dbExpenses.find(function(x){ return x.id === id; });
-    if (!e) return dbErr('Expense not found');
-    e.status = 'rejected';
-    e.rejectionReason = reason;
-    return ok(Object.assign({}, e));
+  async function saveExpense(userId, data) {
+    if (!_supabase) {
+      if (data.id) {
+        var idx = _dbExpenses.findIndex(function(e){ return e.id === data.id; });
+        if (idx !== -1) {
+          _dbExpenses[idx] = Object.assign({}, _dbExpenses[idx], data);
+          return ok(Object.assign({}, _dbExpenses[idx]));
+        }
+      }
+      var newExp = Object.assign({
+        id: dbNewId(), userId: userId,
+        status: 'draft', submittedAt: null,
+        approvedBy: null, approvedAt: null, rejectionReason: null
+      }, data);
+      _dbExpenses.push(newExp);
+      return ok(Object.assign({}, newExp));
+    }
+    var row = { user_id: userId, date: data.date, category_id: data.categoryId,
+                amount: data.amount, description: data.description, receipt_ref: data.receiptRef || '' };
+    if (data.id) {
+      var r = await _supabase.from('expenses').update(row).eq('id', data.id).select().single();
+      if (r.error) return dbErr(r.error.message);
+      return ok(mapExpense(r.data));
+    }
+    var r = await _supabase.from('expenses').insert(row).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapExpense(r.data));
   }
 
-  function deleteExpense(id) {
-    var idx = _dbExpenses.findIndex(function(e){ return e.id === id; });
-    if (idx === -1) return dbErr('Expense not found');
-    _dbExpenses.splice(idx, 1);
+  async function submitExpense(id) {
+    if (!_supabase) {
+      var e = _dbExpenses.find(function(x){ return x.id === id; });
+      if (!e) return dbErr('Expense not found');
+      if (e.status !== 'draft' && e.status !== 'rejected') return dbErr('Cannot submit in current state');
+      e.status = 'submitted';
+      e.submittedAt = new Date().toISOString();
+      e.rejectionReason = null;
+      return ok(Object.assign({}, e));
+    }
+    var r = await _supabase.from('expenses').update({ status: 'submitted', submitted_at: new Date().toISOString(), rejection_reason: null }).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapExpense(r.data));
+  }
+
+  async function approveExpense(id, adminUserId) {
+    if (!_supabase) {
+      var e = _dbExpenses.find(function(x){ return x.id === id; });
+      if (!e) return dbErr('Expense not found');
+      e.status = 'approved';
+      e.approvedBy = adminUserId || null;
+      e.approvedAt = new Date().toISOString();
+      return ok(Object.assign({}, e));
+    }
+    var r = await _supabase.from('expenses').update({ status: 'approved', approved_by: adminUserId || null, approved_at: new Date().toISOString() }).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapExpense(r.data));
+  }
+
+  async function rejectExpense(id, reason) {
+    if (!_supabase) {
+      var e = _dbExpenses.find(function(x){ return x.id === id; });
+      if (!e) return dbErr('Expense not found');
+      e.status = 'rejected';
+      e.rejectionReason = reason;
+      return ok(Object.assign({}, e));
+    }
+    var r = await _supabase.from('expenses').update({ status: 'rejected', rejection_reason: reason }).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    return ok(mapExpense(r.data));
+  }
+
+  async function deleteExpense(id) {
+    if (!_supabase) {
+      var idx = _dbExpenses.findIndex(function(e){ return e.id === id; });
+      if (idx === -1) return dbErr('Expense not found');
+      _dbExpenses.splice(idx, 1);
+      return ok(true);
+    }
+    var r = await _supabase.from('expenses').delete().eq('id', id);
+    if (r.error) return dbErr(r.error.message);
     return ok(true);
   }
 
@@ -1182,9 +1387,13 @@
     root.querySelector('#sum-logout').addEventListener('click', function () { logout(); navigate('#/login'); });
 
     // Collect all non-draft timesheets for this user
-    var allSheets = _dbTimesheets
-      .filter(function(ts) { return ts.userId === user.id && ts.status !== 'draft'; })
-      .sort(function(a, b) { return b.weekStart.localeCompare(a.weekStart); });
+    var sheetsRes = await getTimesheetsByUser(user.id);
+    var sheetsData = sheetsRes.data || [];
+    var allSheets = sheetsData.map(function(item){ return item.timesheet; });
+    var entriesMap = {};
+    sheetsData.forEach(function(item){ entriesMap[item.timesheet.id] = item.entries; });
+    var expRes2 = await getExpensesByUser(user.id);
+    var allExpenses = expRes2.data || [];
 
     // Derive available years
     var yearSet = {};
@@ -1247,16 +1456,16 @@
         var mRegHrs = 0, mOtHrs = 0, mAmt = 0, mExpAmt = 0;
 
         var weekRows = byMonth[ym].map(function(ts) {
-          var entries = _dbEntries.filter(function(e) { return e.timesheetId === ts.id; });
+          var entries = entriesMap[ts.id] || [];
           var tots    = weeklyTotals(entries);
           var lineAmt = tots.regular * rate + tots.overtime * otRate;
           mRegHrs += tots.regular; mOtHrs += tots.overtime; mAmt += lineAmt;
           var wkEnd = new Date(ts.weekStart + 'T00:00:00');
           wkEnd.setDate(wkEnd.getDate() + 6);
           var wkEndIso = wkEnd.getFullYear() + '-' + String(wkEnd.getMonth() + 1).padStart(2, '0') + '-' + String(wkEnd.getDate()).padStart(2, '0');
-          var wkExpAmt = _dbExpenses
+          var wkExpAmt = allExpenses
             .filter(function(ex) {
-              return ex.userId === user.id && (ex.status === 'approved' || ex.status === 'submitted') && ex.date >= ts.weekStart && ex.date <= wkEndIso;
+              return (ex.status === 'approved' || ex.status === 'submitted') && ex.date >= ts.weekStart && ex.date <= wkEndIso;
             })
             .reduce(function(s, ex) { return s + (ex.amount || 0); }, 0);
           mExpAmt += wkExpAmt;
@@ -1634,7 +1843,6 @@
       return;
     }
     var exp = res.data;
-    var cat = _dbExpenseCategories.find(function(c){ return c.id === exp.categoryId; });
 
     main.innerHTML =
       '<a class="back-link" href="#/admin/expenses">&#8592; Back to Pending Expenses</a>' +
@@ -1646,7 +1854,7 @@
         '<div class="section-card" style="margin-top:0"><h2>Expense Detail</h2>' +
           '<table class="totals-table" style="margin-top:var(--space-3)"><tbody>' +
             '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Date</th><td>' + esc(exp.date) + '</td></tr>' +
-            '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Category</th><td>' + esc(cat ? cat.name : '—') + '</td></tr>' +
+            '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Category</th><td>' + esc(exp.categoryName || '—') + '</td></tr>' +
             '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Amount</th><td style="font-weight:700;color:var(--color-primary)">' + fmtMoney(exp.amount) + '</td></tr>' +
             '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Description</th><td>' + esc(exp.description) + '</td></tr>' +
             '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Receipt ref.</th><td>' +
@@ -1852,13 +2060,28 @@
       var usersRes  = await getUsers();
       var employees = (usersRes.data || []).filter(function(u) { return u.role === 'employee'; });
 
-      var inRange = _dbTimesheets.filter(function(ts) {
-        return ts.status === 'approved' && ts.weekStart >= from && ts.weekStart <= to;
-      }).sort(function(a, b) { return a.weekStart.localeCompare(b.weekStart); });
+      var _billTsRaw = [], _billExpRaw = [];
+      if (_supabase) {
+        var _billResults = await Promise.all([
+          _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('status', 'approved').gte('week_start', from).lte('week_start', to).order('week_start'),
+          _supabase.from('expenses').select('*, expense_categories(name)').eq('status', 'approved').gte('date', from).lte('date', to)
+        ]);
+        if (_billResults[0].error) { out.innerHTML = '<p style="color:var(--color-danger);padding:var(--space-4)">Error: ' + esc(_billResults[0].error.message) + '</p>'; return; }
+        if (_billResults[1].error) { out.innerHTML = '<p style="color:var(--color-danger);padding:var(--space-4)">Error: ' + esc(_billResults[1].error.message) + '</p>'; return; }
+        _billTsRaw  = _billResults[0].data || [];
+        _billExpRaw = _billResults[1].data || [];
+      }
 
-      var inRangeExpenses = _dbExpenses.filter(function(ex) {
-        return ex.status === 'approved' && ex.date >= from && ex.date <= to;
-      });
+      var inRange = _supabase
+        ? _billTsRaw.map(function(row){ return Object.assign(mapTimesheet(row), { _entries: (row.timesheet_entries || []).map(mapEntry) }); })
+        : _dbTimesheets.filter(function(ts){ return ts.status === 'approved' && ts.weekStart >= from && ts.weekStart <= to; }).sort(function(a, b){ return a.weekStart.localeCompare(b.weekStart); });
+
+      var inRangeExpenses = _supabase
+        ? _billExpRaw.map(function(row){ return Object.assign(mapExpense(row), { categoryName: (row.expense_categories && row.expense_categories.name) || '—' }); })
+        : _dbExpenses.filter(function(ex){ return ex.status === 'approved' && ex.date >= from && ex.date <= to; }).map(function(ex){
+            var cat = _dbExpenseCategories.find(function(c){ return c.id === ex.categoryId; });
+            return Object.assign({}, ex, { categoryName: cat ? cat.name : '—' });
+          });
 
       if (inRange.length === 0 && inRangeExpenses.length === 0) {
         out.innerHTML = '<div class="empty-state" style="padding:var(--space-12)"><p>No approved timesheets or expenses in this period.</p><small>Approve timesheets or expenses first, then generate the report.</small></div>';
@@ -1873,8 +2096,8 @@
 
       employees.forEach(function(emp) {
         var empSheets   = inRange.filter(function(ts) { return ts.userId === emp.id; });
-        var empExpenses = _dbExpenses.filter(function(ex) {
-          return ex.userId === emp.id && ex.status === 'approved' && ex.date >= from && ex.date <= to;
+        var empExpenses = inRangeExpenses.filter(function(ex) {
+          return ex.userId === emp.id;
         }).sort(function(a, b){ return a.date.localeCompare(b.date); });
 
         if (empSheets.length === 0 && empExpenses.length === 0) return;
@@ -1884,7 +2107,7 @@
         var empRegTotal = 0, empOtTotal = 0, empLaborAmt = 0;
 
         var weekRows = empSheets.map(function(ts) {
-          var entries = _dbEntries.filter(function(e) { return e.timesheetId === ts.id; });
+          var entries = ts._entries || _dbEntries.filter(function(e) { return e.timesheetId === ts.id; });
           var tots    = weeklyTotals(entries);
           var regAmt  = tots.regular  * rate;
           var otAmt   = tots.overtime * otRate;
@@ -1918,10 +2141,9 @@
         var expSection = '';
         if (empExpenses.length > 0) {
           var expRows = empExpenses.map(function(ex) {
-            var cat = _dbExpenseCategories.find(function(c){ return c.id === ex.categoryId; });
             return '<tr>' +
               '<td data-label="Date">'        + esc(ex.date) + '</td>' +
-              '<td data-label="Category">'    + esc(cat ? cat.name : '—') + '</td>' +
+              '<td data-label="Category">'    + esc(ex.categoryName || '—') + '</td>' +
               '<td data-label="Description" colspan="2">' + esc(ex.description) + '</td>' +
               '<td data-label="Amount" style="text-align:right;font-weight:600">' + fmtMoney(ex.amount) + '</td>' +
             '</tr>';
