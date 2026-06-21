@@ -11,7 +11,8 @@ create table if not exists profiles (
   name         text not null,
   role         text not null check (role in ('employee','admin')) default 'employee',
   hourly_rate  numeric(10,2) not null default 0,
-  banked_hours numeric(6,2)  not null default 0
+  banked_hours numeric(6,2)  not null default 0,
+  email        text not null default ''
 );
 
 create table if not exists app_settings (
@@ -21,7 +22,8 @@ create table if not exists app_settings (
 insert into app_settings (key, value) values
   ('ot_threshold_hours', '40'),
   ('ot_multiplier',      '1.5'),
-  ('week_start_day',     '6')
+  ('week_start_day',     '6'),
+  ('admin_email',        '')
 on conflict (key) do nothing;
 
 create table if not exists charge_codes (
@@ -84,11 +86,12 @@ create table if not exists expenses (
 create or replace function handle_new_user()
 returns trigger language plpgsql security definer as $$
 begin
-  insert into public.profiles (id, name, role)
+  insert into public.profiles (id, name, role, email)
   values (
     new.id,
     coalesce(new.raw_user_meta_data->>'name', new.email),
-    'employee'
+    'employee',
+    new.email
   );
   return new;
 end;

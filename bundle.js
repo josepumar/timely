@@ -52,6 +52,13 @@
   // Runtime values — overwritten by loadAppSettings() on startup
   var _otThreshold  = OT_THRESHOLD_HOURS;
   var _otMultiplier = 1.5;
+  var _adminEmail   = '';
+
+  function mailtoLink(to, subject, body) {
+    return 'mailto:' + encodeURIComponent(to) +
+      '?subject=' + encodeURIComponent(subject) +
+      '&body='    + encodeURIComponent(body);
+  }
 
   // ─── Supabase Client ──────────────────────────────────────────────────────
   // Null when URL is empty — app falls back to mock auth/data (Phase 1 behaviour).
@@ -152,7 +159,7 @@
     if (!_supabase) return null;
     var r = await _supabase
       .from('profiles')
-      .select('id, name, role, hourly_rate, banked_hours')
+      .select('id, name, role, email, hourly_rate, banked_hours')
       .eq('id', authUser.id)
       .single();
     if (r.error || !r.data) return null;
@@ -276,7 +283,7 @@
              approvedAt: r.approved_at, rejectionReason: r.rejection_reason };
   }
   function mapProfile(r) {
-    return { id: r.id, name: r.name, role: r.role,
+    return { id: r.id, name: r.name, role: r.role, email: r.email || '',
              hourlyRate: r.hourly_rate || 0, bankedHours: r.banked_hours || 0 };
   }
 
@@ -318,7 +325,7 @@
     if (!_supabase) {
       return ok(MOCK_USERS.map(function(u){ var copy = Object.assign({}, u); delete copy.password; return copy; }));
     }
-    var r = await _supabase.from('profiles').select('id, name, role, hourly_rate, banked_hours').order('name');
+    var r = await _supabase.from('profiles').select('id, name, role, email, hourly_rate, banked_hours').order('name');
     if (r.error) return dbErr(r.error.message);
     return ok(r.data.map(function(row){ return Object.assign(mapProfile(row), { email: '' }); }));
   }
@@ -333,6 +340,7 @@
     var row = {};
     if (patch.name        !== undefined) row.name         = patch.name;
     if (patch.role        !== undefined) row.role         = patch.role;
+    if (patch.email       !== undefined) row.email        = patch.email;
     if (patch.hourlyRate  !== undefined) row.hourly_rate  = patch.hourlyRate;
     if (patch.bankedHours !== undefined) row.banked_hours = patch.bankedHours;
     var r = await _supabase.from('profiles').update(row).eq('id', id).select().single();
@@ -347,6 +355,7 @@
     r.data.forEach(function(row) {
       if (row.key === 'ot_threshold_hours') _otThreshold  = parseFloat(row.value) || OT_THRESHOLD_HOURS;
       if (row.key === 'ot_multiplier')      _otMultiplier = parseFloat(row.value) || OT_MULTIPLIER_DEFAULT;
+      if (row.key === 'admin_email')        _adminEmail   = row.value || '';
     });
   }
 
@@ -356,6 +365,7 @@
     if (r.error) return dbErr(r.error.message);
     if (key === 'ot_threshold_hours') _otThreshold  = parseFloat(value) || OT_THRESHOLD_HOURS;
     if (key === 'ot_multiplier')      _otMultiplier = parseFloat(value) || OT_MULTIPLIER_DEFAULT;
+    if (key === 'admin_email')        _adminEmail   = value || '';
     return ok(true);
   }
 
@@ -408,7 +418,7 @@
     }
     var r = await _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('id', id).single();
     if (r.error) return dbErr(r.error.message);
-    var pr = await _supabase.from('profiles').select('id, name, role, hourly_rate, banked_hours').eq('id', r.data.user_id).single();
+    var pr = await _supabase.from('profiles').select('id, name, role, email, hourly_rate, banked_hours').eq('id', r.data.user_id).single();
     if (pr.error) return dbErr(pr.error.message);
     var entries = (r.data.timesheet_entries || []).map(mapEntry);
     return ok({ timesheet: mapTimesheet(r.data), user: mapProfile(pr.data), entries: entries, totals: weeklyTotals(entries) });
@@ -599,7 +609,7 @@
     }
     var r = await _supabase.from('expenses').select('*, expense_categories(name)').eq('id', id).single();
     if (r.error) return dbErr(r.error.message);
-    var pr = await _supabase.from('profiles').select('id, name, role, hourly_rate, banked_hours').eq('id', r.data.user_id).single();
+    var pr = await _supabase.from('profiles').select('id, name, role, email, hourly_rate, banked_hours').eq('id', r.data.user_id).single();
     if (pr.error) return dbErr(pr.error.message);
     return ok(Object.assign(mapExpense(r.data), {
       user: mapProfile(pr.data),
@@ -1137,7 +1147,18 @@
     var badge = _empRoot.querySelector('#status-badge');
     if (badge) { badge.className = 'badge badge--submitted'; badge.textContent = 'Submitted'; }
     var bar = _empRoot.querySelector('#action-bar');
-    if (bar) bar.innerHTML = '';
+    if (bar) {
+      if (_adminEmail) {
+        var _su = currentUser();
+        var _wk = formatWeekShort(empIsoDate(_empWeekStart));
+        var _href = mailtoLink(_adminEmail,
+          'Timesheet ready for review — ' + (_su ? _su.name : '') + ', ' + _wk,
+          'Hi,\n\nMy timesheet for ' + _wk + ' has been submitted and is ready for your review.\n\n— ' + (_su ? _su.name : ''));
+        bar.innerHTML = '<div style="padding:var(--space-3) 0"><a href="' + esc(_href) + '" class="btn btn--secondary btn--sm">✉ Notify admin</a></div>';
+      } else {
+        bar.innerHTML = '';
+      }
+    }
     var grid = _empRoot.querySelector('#timesheet-grid');
     if (grid) grid.innerHTML = timesheetGridReadonlyHtml(_empEntries, _empChargeCodes, empIsoDate(_empWeekStart));
     var rejBanner = _empRoot.querySelector('[style*="danger-light"]');
@@ -1246,13 +1267,30 @@
     if (ts.status !== 'submitted') return;
     var adminId = currentUser() ? currentUser().id : null;
 
+    function tsDecisionDone(label, empEmail, empName, subject, body) {
+      var aside = main.querySelector('aside');
+      if (!aside) { navigate('#/admin/approvals'); return; }
+      var emailBtn = (empEmail)
+        ? '<a href="' + esc(mailtoLink(empEmail, subject, body)) + '" class="btn btn--secondary btn--block" style="margin-top:var(--space-3)">✉ Email ' + esc(empName) + '</a>'
+        : '';
+      aside.innerHTML =
+        '<div class="section-card" style="margin-top:0">' +
+          '<p style="font-weight:600;margin-bottom:var(--space-3)">' + label + '</p>' +
+          emailBtn +
+          '<a href="#/admin/approvals" class="btn btn--ghost btn--block" style="margin-top:var(--space-2)">← Back to list</a>' +
+        '</div>';
+    }
+
     main.querySelector('#approve-btn').addEventListener('click', async function () {
       var btn = main.querySelector('#approve-btn');
       btn.disabled = true; btn.textContent = 'Approving…';
       var res = await approveTimesheet(id, adminId);
       if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✓ Approve'; return; }
       showToast('Timesheet approved.', 'success');
-      navigate('#/admin/approvals');
+      tsDecisionDone('✓ Approved',
+        user ? user.email : '', user ? user.name : 'employee',
+        'Timesheet approved — ' + formatWeekShort(ts.weekStart),
+        'Hi ' + (user ? user.name : '') + ',\n\nYour timesheet for ' + formatWeekShort(ts.weekStart) + ' has been approved.\n\nThanks!');
     });
 
     main.querySelector('#reject-btn').addEventListener('click', async function () {
@@ -1265,7 +1303,10 @@
       var res = await rejectTimesheet(id, reason);
       if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✕ Reject'; return; }
       showToast('Timesheet rejected.', 'info');
-      navigate('#/admin/approvals');
+      tsDecisionDone('✕ Returned for changes',
+        user ? user.email : '', user ? user.name : 'employee',
+        'Timesheet returned — ' + formatWeekShort(ts.weekStart),
+        'Hi ' + (user ? user.name : '') + ',\n\nYour timesheet for ' + formatWeekShort(ts.weekStart) + ' needs changes.\n\nReason: ' + reason + '\n\nPlease update and resubmit. Thanks!');
     });
   }
 
@@ -1388,7 +1429,7 @@
         if (u.id === _editingId) {
           return '<tr>' +
             '<td data-label="Name"><input id="edit-name" class="input input--sm" value="' + esc(u.name) + '" style="width:100%;min-width:7rem"></td>' +
-            '<td data-label="Email" style="color:var(--color-neutral-400)">' + esc(u.email || '—') + '</td>' +
+            '<td data-label="Email"><input id="edit-email" class="input input--sm" type="email" value="' + esc(u.email || '') + '" style="width:100%;min-width:10rem"></td>' +
             '<td data-label="Role">' +
               '<select id="edit-role" class="input input--select input--sm">' +
                 '<option value="employee"' + (u.role === 'employee' ? ' selected' : '') + '>Employee</option>' +
@@ -1442,11 +1483,12 @@
       if (cancelBtn) { _editingId = null; renderTable(); return; }
       if (saveBtn) {
         var nameVal   = (main.querySelector('#edit-name')   || {}).value || '';
+        var emailVal  = (main.querySelector('#edit-email')  || {}).value || '';
         var roleVal   = (main.querySelector('#edit-role')   || {}).value || 'employee';
         var rateVal   = parseFloat((main.querySelector('#edit-rate')   || {}).value) || 0;
         var bankedVal = parseFloat((main.querySelector('#edit-banked') || {}).value) || 0;
         if (!nameVal.trim()) { showToast('Name is required.', 'error'); return; }
-        var upd = await updateProfile(saveBtn.dataset.id, { name: nameVal.trim(), role: roleVal, hourlyRate: rateVal, bankedHours: bankedVal });
+        var upd = await updateProfile(saveBtn.dataset.id, { name: nameVal.trim(), email: emailVal.trim(), role: roleVal, hourlyRate: rateVal, bankedHours: bankedVal });
         if (upd.error) { showToast('Update failed: ' + upd.error.message, 'error'); return; }
         var idx = _users.findIndex(function(u){ return u.id === saveBtn.dataset.id; });
         if (idx !== -1) _users[idx] = Object.assign(_users[idx], upd.data);
@@ -1718,6 +1760,18 @@
         if (idx !== -1) _expList[idx] = Object.assign(_expList[idx], r.data);
         expRenderList();
         showToast('Expense submitted.', 'success');
+        if (_adminEmail) {
+          var _eu = currentUser();
+          var _ehref = mailtoLink(_adminEmail,
+            'Expense submitted for review — ' + (_eu ? _eu.name : ''),
+            'Hi,\n\nI\'ve submitted an expense for your review.\n\n— ' + (_eu ? _eu.name : ''));
+          var _nudge = document.createElement('div');
+          _nudge.style.cssText = 'padding:var(--space-3) var(--space-4);background:var(--color-primary-light);border-radius:var(--radius-md);margin-bottom:var(--space-4);display:flex;align-items:center;gap:var(--space-3)';
+          _nudge.innerHTML = '<span style="flex:1;font-size:var(--font-size-sm)">Submitted ✓</span><a href="' + esc(_ehref) + '" class="btn btn--secondary btn--sm">✉ Notify admin</a>';
+          var _lc = _expRoot.querySelector('#exp-list-container');
+          if (_lc) _lc.insertAdjacentElement('beforebegin', _nudge);
+          setTimeout(function(){ _nudge.remove(); }, 10000);
+        }
         return;
       }
       if (deleteBtn) {
@@ -1984,13 +2038,30 @@
     if (exp.status !== 'submitted') return;
     var adminId = currentUser() ? currentUser().id : null;
 
+    function expDecisionDone(label, empEmail, empName, subject, body) {
+      var aside = main.querySelector('aside');
+      if (!aside) { navigate('#/admin/expenses'); return; }
+      var emailBtn = (empEmail)
+        ? '<a href="' + esc(mailtoLink(empEmail, subject, body)) + '" class="btn btn--secondary btn--block" style="margin-top:var(--space-3)">✉ Email ' + esc(empName) + '</a>'
+        : '';
+      aside.innerHTML =
+        '<div class="section-card" style="margin-top:0">' +
+          '<p style="font-weight:600;margin-bottom:var(--space-3)">' + label + '</p>' +
+          emailBtn +
+          '<a href="#/admin/expenses" class="btn btn--ghost btn--block" style="margin-top:var(--space-2)">← Back to list</a>' +
+        '</div>';
+    }
+
     main.querySelector('#exp-approve-btn').addEventListener('click', async function() {
       var btn = main.querySelector('#exp-approve-btn');
       btn.disabled = true; btn.textContent = 'Approving…';
       var r = await approveExpense(id, adminId);
       if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '&#10003; Approve'; return; }
       showToast('Expense approved.', 'success');
-      navigate('#/admin/expenses');
+      expDecisionDone('✓ Approved',
+        exp.user ? exp.user.email : '', exp.user ? exp.user.name : 'employee',
+        'Expense approved — ' + exp.date,
+        'Hi ' + (exp.user ? exp.user.name : '') + ',\n\nYour expense of $' + (exp.amount || 0).toFixed(2) + ' on ' + exp.date + ' has been approved.\n\nThanks!');
     });
 
     main.querySelector('#exp-reject-btn').addEventListener('click', async function() {
@@ -2003,7 +2074,10 @@
       var r = await rejectExpense(id, reason);
       if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '&#10005; Reject'; return; }
       showToast('Expense rejected.', 'info');
-      navigate('#/admin/expenses');
+      expDecisionDone('✕ Returned',
+        exp.user ? exp.user.email : '', exp.user ? exp.user.name : 'employee',
+        'Expense returned — ' + exp.date,
+        'Hi ' + (exp.user ? exp.user.name : '') + ',\n\nYour expense of $' + (exp.amount || 0).toFixed(2) + ' on ' + exp.date + ' was not approved.\n\nReason: ' + reason + '\n\nPlease update and resubmit. Thanks!');
     });
   }
 
@@ -2351,6 +2425,12 @@
 
     main.insertAdjacentHTML('beforeend',
       '<div class="section-card" style="margin-top:0;max-width:28rem">' +
+        '<h2>Notifications</h2>' +
+        '<div class="form-group" style="margin-bottom:var(--space-6)">' +
+          '<label for="set-admin-email">Admin notification email</label>' +
+          '<input id="set-admin-email" class="input" type="email" value="' + esc(_adminEmail) + '" placeholder="admin@example.com">' +
+          '<small style="color:var(--color-neutral-400);display:block;margin-top:var(--space-1)">Employees are shown a mailto link to this address after submitting a timesheet or expense.</small>' +
+        '</div>' +
         '<h2>Overtime Rules</h2>' +
         '<p style="font-size:var(--font-size-sm);color:var(--color-neutral-500);margin-bottom:var(--space-5)">Applied globally to My Summary and used as the default in Billing Reports.</p>' +
         '<div class="form-group">' +
@@ -2369,18 +2449,20 @@
 
     main.querySelector('#save-settings-btn').addEventListener('click', async function() {
       var btn       = main.querySelector('#save-settings-btn');
-      var threshold = parseFloat(main.querySelector('#set-threshold').value);
-      var mult      = parseFloat(main.querySelector('#set-multiplier').value);
-      var msg       = main.querySelector('#settings-msg');
+      var adminEmailVal = (main.querySelector('#set-admin-email') || {}).value || '';
+      var threshold     = parseFloat(main.querySelector('#set-threshold').value);
+      var mult          = parseFloat(main.querySelector('#set-multiplier').value);
+      var msg           = main.querySelector('#settings-msg');
       if (!isFinite(threshold) || threshold < 1) { msg.style.color = 'var(--color-danger)'; msg.textContent = 'Threshold must be at least 1 hour.'; return; }
       if (!isFinite(mult) || mult < 1)           { msg.style.color = 'var(--color-danger)'; msg.textContent = 'Multiplier must be at least 1.'; return; }
       btn.disabled = true; btn.textContent = 'Saving…';
       var r1 = await saveAppSetting('ot_threshold_hours', threshold);
       var r2 = await saveAppSetting('ot_multiplier',      mult);
+      var r3 = await saveAppSetting('admin_email',        adminEmailVal.trim());
       btn.disabled = false; btn.textContent = 'Save';
-      if (r1.error || r2.error) {
+      if (r1.error || r2.error || r3.error) {
         msg.style.color = 'var(--color-danger)';
-        msg.textContent = 'Save failed: ' + ((r1.error || r2.error).message);
+        msg.textContent = 'Save failed: ' + ((r1.error || r2.error || r3.error).message);
       } else {
         msg.style.color = 'var(--color-success, #15803d)';
         msg.textContent = 'Saved — new values apply immediately.';
