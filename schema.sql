@@ -102,7 +102,7 @@ create table if not exists reports (
   id          uuid default uuid_generate_v4() primary key,
   name        text not null,
   include_all boolean not null default true,
-  created_by  uuid references profiles(id),
+  created_by  uuid references profiles(id) on delete set null,
   created_at  timestamptz default now()
 );
 
@@ -115,7 +115,7 @@ create table if not exists report_employees (
 create table if not exists report_snapshots (
   id            uuid default uuid_generate_v4() primary key,
   report_id     uuid references reports(id) on delete cascade,
-  generated_by  uuid references profiles(id),
+  generated_by  uuid references profiles(id) on delete set null,
   generated_at  timestamptz default now(),
   date_from     date not null,
   date_to       date not null,
