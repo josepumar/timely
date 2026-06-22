@@ -3,7 +3,7 @@
 A small web app for a family-managed business: employees log weekly time, submit for approval, and track expenses. An admin reviews, approves or rejects, and generates billing reports.
 
 **Live site:** https://josepumar.github.io/timely  
-**Current version:** v0.5  
+**Current version:** v0.5.1  
 **Stack:** Vanilla JS (single IIFE bundle, no build step) · Supabase (auth + Postgres + RLS) · GitHub Pages
 
 ---
@@ -27,7 +27,6 @@ A small web app for a family-managed business: employees log weekly time, submit
    -- approval note column (added in v0.3)
    alter table timesheets add column if not exists approval_note text;
 
-   -- v0.4: returned status + audit log
    -- returned status + audit log (added in v0.4)
    alter table timesheets drop constraint if exists timesheets_status_check;
    alter table timesheets add constraint timesheets_status_check
@@ -47,7 +46,7 @@ A small web app for a family-managed business: employees log weekly time, submit
      entity_type  text not null check (entity_type in ('timesheet','expense')),
      entity_id    uuid not null,
      action       text not null,
-     performed_by uuid references profiles(id),
+     performed_by uuid references profiles(id) on delete set null,
      performed_at timestamptz default now(),
      note         text not null default ''
    );
@@ -62,7 +61,7 @@ A small web app for a family-managed business: employees log weekly time, submit
      id          uuid default uuid_generate_v4() primary key,
      name        text not null,
      include_all boolean not null default true,
-     created_by  uuid references profiles(id),
+     created_by  uuid references profiles(id) on delete set null,
      created_at  timestamptz default now()
    );
    create table if not exists report_employees (
@@ -73,7 +72,7 @@ A small web app for a family-managed business: employees log weekly time, submit
    create table if not exists report_snapshots (
      id            uuid default uuid_generate_v4() primary key,
      report_id     uuid references reports(id) on delete cascade,
-     generated_by  uuid references profiles(id),
+     generated_by  uuid references profiles(id) on delete set null,
      generated_at  timestamptz default now(),
      date_from     date not null,
      date_to       date not null,
@@ -86,8 +85,45 @@ A small web app for a family-managed business: employees log weekly time, submit
    create policy "admin manage reports"   on reports          for all using (is_admin());
    create policy "admin manage re"        on report_employees for all using (is_admin());
    create policy "admin manage snapshots" on report_snapshots for all using (is_admin());
+
+   -- v0.5.1: fix approved_by / performed_by / created_by / generated_by FKs
+   -- (blocks user deletion without these — run even if you ran the blocks above)
+   alter table timesheets     drop constraint if exists timesheets_approved_by_fkey;
+   alter table timesheets     add  constraint timesheets_approved_by_fkey
+     foreign key (approved_by) references profiles(id) on delete set null;
+   alter table expenses       drop constraint if exists expenses_approved_by_fkey;
+   alter table expenses       add  constraint expenses_approved_by_fkey
+     foreign key (approved_by) references profiles(id) on delete set null;
+   alter table audit_log      drop constraint if exists audit_log_performed_by_fkey;
+   alter table audit_log      add  constraint audit_log_performed_by_fkey
+     foreign key (performed_by) references profiles(id) on delete set null;
+   alter table reports        drop constraint if exists reports_created_by_fkey;
+   alter table reports        add  constraint reports_created_by_fkey
+     foreign key (created_by) references profiles(id) on delete set null;
+   alter table report_snapshots drop constraint if exists report_snapshots_generated_by_fkey;
+   alter table report_snapshots add  constraint report_snapshots_generated_by_fkey
+     foreign key (generated_by) references profiles(id) on delete set null;
    ```
 6. Set your Supabase project URL and anon key in `bundle.js` (lines 46–47, constants `SUPABASE_URL` and `SUPABASE_ANON_KEY`).
+
+### Production setup (blank slate, no sample data)
+
+Skip steps 3 and 4 above. Instead:
+
+1. Run `schema.sql` in the SQL Editor.
+2. In **Authentication → Users**, create your real admin and employee accounts.
+3. Promote the admin in the SQL Editor:
+   ```sql
+   update profiles set role = 'admin' where email = 'your-admin@email.com';
+   ```
+4. Log in as admin and configure Charge Codes, Expense Categories, Users & Roles, and Settings.
+
+To delete a test user later, first clear any rows that reference them:
+```sql
+truncate table audit_log;
+truncate table report_snapshots, report_employees, reports cascade;
+delete from auth.users where email = 'test@example.com';
+```
 
 ### RLS fixes applied (already in schema.sql)
 These were corrected after initial deployment — re-running `schema.sql` is idempotent:
@@ -122,14 +158,15 @@ Requires Chrome 90+, Firefox 88+, Safari 15+, or Edge 90+.
 
 ## Credentials
 
-| Email | Role |
-|-------|------|
-| alice@example.com | Employee |
-| bob@example.com | Employee |
-| admin@example.com | Admin |
+**Development / mock mode** (set `SUPABASE_URL = ''` in `bundle.js`):
 
-Passwords are whatever you set when creating the users in Supabase Auth.  
-When `SUPABASE_URL` is blank the app falls back to mock data with password `pass` for all users.
+| Email | Password | Role |
+|-------|----------|------|
+| alice@example.com | pass | Employee |
+| bob@example.com | pass | Employee |
+| admin@example.com | pass | Admin |
+
+**Production** (Supabase connected): use whatever email/password you created in Auth → Users. See *Production setup* above.
 
 ---
 
