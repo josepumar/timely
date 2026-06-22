@@ -49,7 +49,7 @@ create table if not exists timesheets (
   status           text not null default 'draft'
                    check (status in ('draft','submitted','approved','rejected','returned')),
   submitted_at     timestamptz,
-  approved_by      uuid references profiles(id),
+  approved_by      uuid references profiles(id) on delete set null,
   approved_at      timestamptz,
   rejection_reason text,
   approval_note    text,
@@ -77,7 +77,7 @@ create table if not exists expenses (
   status           text not null default 'draft'
                    check (status in ('draft','submitted','approved','rejected','returned')),
   submitted_at     timestamptz,
-  approved_by      uuid references profiles(id),
+  approved_by      uuid references profiles(id) on delete set null,
   approved_at      timestamptz,
   rejection_reason text
 );
