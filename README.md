@@ -3,7 +3,7 @@
 A small web app for a family-managed business: employees log weekly time, submit for approval, and track expenses. An admin reviews, approves or rejects, and generates billing reports.
 
 **Live site:** https://josepumar.github.io/timely  
-**Current version:** v0.3  
+**Current version:** v0.4  
 **Stack:** Vanilla JS (single IIFE bundle, no build step) · Supabase (auth + Postgres + RLS) · GitHub Pages
 
 ---
@@ -23,8 +23,38 @@ A small web app for a family-managed business: employees log weekly time, submit
    alter table profiles add column if not exists email text not null default '';
    update profiles p set email = u.email from auth.users u where p.id = u.id;
    insert into app_settings (key, value) values ('admin_email', '') on conflict (key) do nothing;
+
    -- approval note column (added in v0.3)
    alter table timesheets add column if not exists approval_note text;
+
+   -- returned status + audit log (added in v0.4)
+   alter table timesheets drop constraint if exists timesheets_status_check;
+   alter table timesheets add constraint timesheets_status_check
+     check (status in ('draft','submitted','approved','rejected','returned'));
+
+   alter table expenses drop constraint if exists expenses_status_check;
+   alter table expenses add constraint expenses_status_check
+     check (status in ('draft','submitted','approved','rejected','returned'));
+
+   drop policy if exists "update own draft" on timesheets;
+   create policy "update own draft" on timesheets for update
+     using  (user_id = auth.uid() and status in ('draft','rejected','returned'))
+     with check (user_id = auth.uid());
+
+   create table if not exists audit_log (
+     id           uuid default uuid_generate_v4() primary key,
+     entity_type  text not null check (entity_type in ('timesheet','expense')),
+     entity_id    uuid not null,
+     action       text not null,
+     performed_by uuid references profiles(id),
+     performed_at timestamptz default now(),
+     note         text not null default ''
+   );
+   alter table audit_log enable row level security;
+   drop policy if exists "admin read audit" on audit_log;
+   drop policy if exists "admin insert audit" on audit_log;
+   create policy "admin read audit"   on audit_log for select using (is_admin());
+   create policy "admin insert audit" on audit_log for insert with check (is_admin());
    ```
 6. Set your Supabase project URL and anon key in `bundle.js` (lines 46–47, constants `SUPABASE_URL` and `SUPABASE_ANON_KEY`).
 
@@ -80,23 +110,34 @@ When `SUPABASE_URL` is blank the app falls back to mock data with password `pass
 - Hours rounded to nearest 0.5 h (mirrors Excel MROUND formula)
 - Live totals: hours by charge code, regular vs. overtime, weekly total
 - Save draft / Submit for approval
+- Amber "Returned for revision" banner when admin sends a timesheet back; grid re-opens for editing and resubmission
 - **My Expenses** — log, edit, submit, and track expenses by category
 - **My Summary** — year-view table of all submitted/approved timesheets with earnings and expenses; Last 3 months / Full year toggle
 
 ### Admin
+- **All Submissions** — filterable table of every non-draft timesheet and expense across all statuses; filter by status, type, employee name, year, and custom date range (defaults to current year)
 - **Pending Approvals** — list of submitted timesheets; click to review
-- **Review screen** — read-only grid + totals; Approve (with optional note for employee) or Reject (rejection requires a reason)
-- **Pending Expenses** — same approve/reject flow for expenses
+- **Review screen** — read-only grid + totals; Approve (with optional note) or Reject (reason required); Send Back (returns an approved item to the employee for revision, with required reason); full audit timeline showing every status change with actor and timestamp
+- **Pending Expenses** — same approve/reject/send-back flow for expenses
 - **Charge Codes** — add, inline-edit, deactivate/reactivate
 - **Expense Categories** — same management UI
 - **Users & Roles** — inline-edit name, email, role, hourly rate, banked hours
 - **Billing Report** — date-range report of all approved timesheets and expenses, grouped by employee with labor + expense subtotals and grand total
 - **Settings** — admin notification email, OT threshold hours, OT pay multiplier (persisted to `app_settings` table)
 
+### Statuses
+| Status | Who sets it | Meaning |
+|--------|-------------|---------|
+| draft | Employee | Not yet submitted; editable |
+| submitted | Employee | Awaiting admin decision |
+| approved | Admin | Accepted |
+| rejected | Admin | Declined; employee cannot re-edit |
+| returned | Admin | Sent back for revision; employee can edit and resubmit |
+
 ### Email nudge (mailto-based, no server needed)
 - After employee submits a timesheet → **✉ Notify admin** button appears (pre-filled mailto to the admin email set in Settings)
 - After employee submits an expense → 10-second nudge banner with the same link
-- After admin approves/rejects → decision panel replaced with outcome + **✉ Email [employee]** link (pre-filled mailto to the employee's profile email)
+- After admin approves/rejects/sends back → decision panel replaced with outcome + **✉ Email [employee]** link (pre-filled mailto to the employee's profile email)
 
 ---
 
@@ -127,6 +168,7 @@ Everything runtime lives in `bundle.js`. There is no build step, no npm, no fram
 - **snake_case ↔ camelCase** — four mapper helpers (`mapTimesheet`, `mapEntry`, `mapExpense`, `mapProfile`) translate between DB columns and app fields.
 - **OT settings** — loaded from `app_settings` at startup into `_otThreshold` / `_otMultiplier`; all calculations use these runtime vars.
 - **Week starts Saturday** — `WEEK_START_DAY = 6` (JS `Date.getDay()`).
+- **Audit log** — every status change (submit / approve / reject / return) appends an event to `_dbAuditLog` (mock) or the `audit_log` table (Supabase). Surfaced as a timeline in the admin review screens.
 - **Version** — `VERSION` constant in `bundle.js`; displayed on the login card and in the admin sidebar footer. Tag releases with `git tag vX.Y`.
 
 ---
@@ -172,3 +214,14 @@ Deleting a draft expense has no "are you sure?" prompt. Rejecting a timesheet na
 
 ### 3. Pagination on Pending Approvals / Pending Expenses
 Currently all submitted timesheets and expenses are loaded at once. For a larger team this could get long. The Expenses list already has 20-per-page pagination — the admin pending lists could use the same pattern.
+
+### 4. Returned expenses not editable by employee (two-part bug)
+When an admin sends an expense back with status `returned`, the employee cannot edit or resubmit it:
+- **bundle.js** — the employee expenses list only checks `status === 'draft' || status === 'rejected'` for showing Edit/Submit buttons; needs `|| status === 'returned'`.
+- **schema.sql / Supabase RLS** — the `expenses` `update own draft` policy uses `status = 'draft'`; needs to include `'rejected'` and `'returned'` to match the timesheets policy. Run in the SQL Editor:
+  ```sql
+  drop policy if exists "update own draft" on expenses;
+  create policy "update own draft" on expenses for update
+    using  (user_id = auth.uid() and status in ('draft','rejected','returned'))
+    with check (user_id = auth.uid());
+  ```
