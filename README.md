@@ -17,11 +17,14 @@ A small web app for a family-managed business: employees log weekly time, submit
    - `bob@example.com` / any password (employee)
    - `admin@example.com` / any password (admin)
 4. Run `seed.sql` in the SQL Editor (populates profiles, charge codes, expense categories, and sample data).
-5. Run the email-column migration (one-time, for existing projects):
+5. Run the migrations below (one-time, for existing projects):
    ```sql
+   -- email column (added in v0.2)
    alter table profiles add column if not exists email text not null default '';
    update profiles p set email = u.email from auth.users u where p.id = u.id;
    insert into app_settings (key, value) values ('admin_email', '') on conflict (key) do nothing;
+   -- approval note column (added in v0.3)
+   alter table timesheets add column if not exists approval_note text;
    ```
 6. Set your Supabase project URL and anon key in `bundle.js` (lines 46–47, constants `SUPABASE_URL` and `SUPABASE_ANON_KEY`).
 
@@ -159,23 +162,13 @@ git push && git push origin vX.Y
 
 These are ready to pick up in the next session:
 
-### 1. Banked hours auto-adjustment
-When a timesheet is approved, automatically update the employee's `banked_hours` in `profiles` based on the difference between hours worked and the OT threshold. Currently `banked_hours` must be updated manually via Admin → Users.
-
-**Suggested approach:** In `approveTimesheet()` (Supabase path), after the status update, compute `delta = totals.regular - _otThreshold` and call `updateProfile(userId, { bankedHours: currentBanked + delta })`. Requires fetching current `banked_hours` before updating.
-
-### 2. Admin can write a note on approval
-Currently the approve action has no message field — only rejection has a reason. A short optional "approval note" field on the review screen would let the admin leave feedback for the employee.
-
-**Suggested approach:** Add an `approval_note text` column to `timesheets`. Show it as an optional textarea alongside the Approve button. Display it on the employee's timesheet view when status is `approved`.
-
-### 3. Employee email is editable but not synced to Supabase Auth
+### 1. Employee email is editable but not synced to Supabase Auth
 The `profiles.email` field (used for mailto links) is set by the trigger on signup and editable in the Users screen. It is separate from `auth.users.email`. If a user's auth email changes, it won't propagate automatically.
 
 **Suggested fix:** Either document this as a known limitation, or add a Supabase Edge Function/webhook that syncs `auth.users.email` → `profiles.email` on user update.
 
-### 4. No confirmation before destructive actions
+### 2. No confirmation before destructive actions
 Deleting a draft expense has no "are you sure?" prompt. Rejecting a timesheet navigates away without confirmation. Consider adding a lightweight confirmation modal or inline confirmation step.
 
-### 5. Pagination on Pending Approvals / Pending Expenses
+### 3. Pagination on Pending Approvals / Pending Expenses
 Currently all submitted timesheets and expenses are loaded at once. For a larger team this could get long. The Expenses list already has 20-per-page pagination — the admin pending lists could use the same pattern.

@@ -46,7 +46,7 @@
   const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
 
-  const VERSION = '0.2';
+  const VERSION = '0.3';
   const OT_THRESHOLD_HOURS    = 40;
   const WEEK_START_DAY        = 6;
   // Runtime values — overwritten by loadAppSettings() on startup
@@ -205,13 +205,13 @@
 
   let _dbTimesheets = [
     { id: 'ts1', userId: 'u1', weekStart: '2026-06-13', status: 'submitted',
-      submittedAt: '2026-06-16T10:32:00Z', approvedBy: null, approvedAt: null, rejectionReason: null },
+      submittedAt: '2026-06-16T10:32:00Z', approvedBy: null, approvedAt: null, rejectionReason: null, approvalNote: null },
     { id: 'ts2', userId: 'u2', weekStart: '2026-06-13', status: 'draft',
-      submittedAt: null, approvedBy: null, approvedAt: null, rejectionReason: null },
+      submittedAt: null, approvedBy: null, approvedAt: null, rejectionReason: null, approvalNote: null },
     { id: 'ts3', userId: 'u1', weekStart: '2026-06-06', status: 'approved',
-      submittedAt: '2026-06-09T09:00:00Z', approvedBy: 'u3', approvedAt: '2026-06-10T14:00:00Z', rejectionReason: null },
+      submittedAt: '2026-06-09T09:00:00Z', approvedBy: 'u3', approvedAt: '2026-06-10T14:00:00Z', rejectionReason: null, approvalNote: null },
     { id: 'ts4', userId: 'u2', weekStart: '2026-06-06', status: 'approved',
-      submittedAt: '2026-06-09T10:15:00Z', approvedBy: 'u3', approvedAt: '2026-06-10T15:00:00Z', rejectionReason: null },
+      submittedAt: '2026-06-09T10:15:00Z', approvedBy: 'u3', approvedAt: '2026-06-10T15:00:00Z', rejectionReason: null, approvalNote: null },
   ];
 
   let _dbEntries = [
@@ -269,7 +269,8 @@
   function mapTimesheet(r) {
     return { id: r.id, userId: r.user_id, weekStart: r.week_start, status: r.status,
              submittedAt: r.submitted_at, approvedBy: r.approved_by,
-             approvedAt: r.approved_at, rejectionReason: r.rejection_reason };
+             approvedAt: r.approved_at, rejectionReason: r.rejection_reason,
+             approvalNote: r.approval_note || null };
   }
   function mapEntry(r) {
     return { id: r.id, timesheetId: r.timesheet_id, dayOffset: r.day_offset,
@@ -429,7 +430,7 @@
       var ts = _dbTimesheets.find(function(t){ return t.userId === userId && t.weekStart === weekStartIso; });
       if (!ts) {
         ts = { id: dbNewId(), userId: userId, weekStart: weekStartIso, status: 'draft',
-               submittedAt: null, approvedBy: null, approvedAt: null, rejectionReason: null };
+               submittedAt: null, approvedBy: null, approvedAt: null, rejectionReason: null, approvalNote: null };
         _dbTimesheets.push(ts);
       }
       _dbEntries = _dbEntries.filter(function(e){ return e.timesheetId !== ts.id; });
@@ -479,16 +480,17 @@
     return ok(mapTimesheet(r.data));
   }
 
-  async function approveTimesheet(timesheetId, adminUserId) {
+  async function approveTimesheet(timesheetId, adminUserId, note) {
     if (!_supabase) {
       var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
       if (!ts) return dbErr('Timesheet not found');
       ts.status = 'approved';
       ts.approvedBy = adminUserId || null;
       ts.approvedAt = new Date().toISOString();
+      ts.approvalNote = note || null;
       return ok(Object.assign({}, ts));
     }
-    var r = await _supabase.from('timesheets').update({ status: 'approved', approved_by: adminUserId || null, approved_at: new Date().toISOString() }).eq('id', timesheetId).select().single();
+    var r = await _supabase.from('timesheets').update({ status: 'approved', approved_by: adminUserId || null, approved_at: new Date().toISOString(), approval_note: note || null }).eq('id', timesheetId).select().single();
     if (r.error) return dbErr(r.error.message);
     return ok(mapTimesheet(r.data));
   }
@@ -893,7 +895,8 @@
   function empRenderShell() {
     var user   = currentUser();
     var status = _empTimesheet ? _empTimesheet.status : 'draft';
-    var rejReason = _empTimesheet ? _empTimesheet.rejectionReason : null;
+    var rejReason    = _empTimesheet ? _empTimesheet.rejectionReason : null;
+    var approvalNote = (_empTimesheet && status === 'approved') ? _empTimesheet.approvalNote : null;
 
     _empRoot.innerHTML =
       '<div class="employee-view">' +
@@ -910,6 +913,7 @@
           '</div>' +
         '</header>' +
         (rejReason ? '<div style="background:var(--color-danger-light);border:1px solid var(--color-danger);color:var(--color-danger-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)"><strong>Rejected:</strong> ' + esc(rejReason) + '</div>' : '') +
+        (approvalNote ? '<div style="background:var(--color-success-light);border:1px solid var(--color-success);color:var(--color-success-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)"><strong>Note from admin:</strong> ' + esc(approvalNote) + '</div>' : '') +
         '<div class="timesheet-grid" id="timesheet-grid"></div>' +
         '<div class="totals-section" id="totals-section">' +
           '<h2>Weekly Summary</h2>' +
@@ -1253,7 +1257,11 @@
           (ts.status === 'submitted' ?
             '<div class="section-card"><h2>Decision</h2>' +
               '<div style="display:flex;flex-direction:column;gap:var(--space-4)">' +
-                '<button class="btn btn--success btn--block" id="approve-btn">✓ Approve</button>' +
+                '<div>' +
+                  '<label for="approve-note" style="font-size:var(--font-size-sm);font-weight:600;display:block;margin-bottom:var(--space-1)">Note for employee (optional)</label>' +
+                  '<textarea id="approve-note" class="input input--textarea" rows="2" placeholder="Optional — employee will see this" style="margin-bottom:var(--space-2)"></textarea>' +
+                  '<button class="btn btn--success btn--block" id="approve-btn">✓ Approve</button>' +
+                '</div>' +
                 '<div class="reject-section">' +
                   '<label for="reject-reason">Rejection reason <span style="color:var(--color-danger)">*</span></label>' +
                   '<textarea id="reject-reason" class="input input--textarea" rows="3" placeholder="Required — employee will see this message"></textarea>' +
@@ -1282,15 +1290,16 @@
     }
 
     main.querySelector('#approve-btn').addEventListener('click', async function () {
+      var note = main.querySelector('#approve-note').value.trim();
       var btn = main.querySelector('#approve-btn');
       btn.disabled = true; btn.textContent = 'Approving…';
-      var res = await approveTimesheet(id, adminId);
+      var res = await approveTimesheet(id, adminId, note);
       if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✓ Approve'; return; }
       showToast('Timesheet approved.', 'success');
       tsDecisionDone('✓ Approved',
         user ? user.email : '', user ? user.name : 'employee',
         'Timesheet approved — ' + formatWeekShort(ts.weekStart),
-        'Hi ' + (user ? user.name : '') + ',\n\nYour timesheet for ' + formatWeekShort(ts.weekStart) + ' has been approved.\n\nThanks!');
+        'Hi ' + (user ? user.name : '') + ',\n\nYour timesheet for ' + formatWeekShort(ts.weekStart) + ' has been approved.' + (note ? '\n\nNote from admin: ' + note : '') + '\n\nThanks!');
     });
 
     main.querySelector('#reject-btn').addEventListener('click', async function () {

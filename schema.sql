@@ -52,6 +52,7 @@ create table if not exists timesheets (
   approved_by      uuid references profiles(id),
   approved_at      timestamptz,
   rejection_reason text,
+  approval_note    text,
   unique(user_id, week_start)
 );
 
