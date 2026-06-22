@@ -3,7 +3,7 @@
 A small web app for a family-managed business: employees log weekly time, submit for approval, and track expenses. An admin reviews, approves or rejects, and generates billing reports.
 
 **Live site:** https://josepumar.github.io/timely  
-**Current version:** v0.2  
+**Current version:** v0.3  
 **Stack:** Vanilla JS (single IIFE bundle, no build step) · Supabase (auth + Postgres + RLS) · GitHub Pages
 
 ---
@@ -85,7 +85,7 @@ When `SUPABASE_URL` is blank the app falls back to mock data with password `pass
 
 ### Admin
 - **Pending Approvals** — list of submitted timesheets; click to review
-- **Review screen** — read-only grid + totals; Approve or Reject (rejection requires a reason)
+- **Review screen** — read-only grid + totals; Approve (with optional note for employee) or Reject (rejection requires a reason)
 - **Pending Expenses** — same approve/reject flow for expenses
 - **Charge Codes** — add, inline-edit, deactivate/reactivate
 - **Expense Categories** — same management UI
