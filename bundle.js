@@ -46,7 +46,7 @@
   const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
 
-  const VERSION = '0.5.1';
+  const VERSION = '0.5.2';
   const OT_THRESHOLD_HOURS    = 40;
   const WEEK_START_DAY        = 6;
   // Runtime values — overwritten by loadAppSettings() on startup
@@ -353,7 +353,7 @@
     }
     var r = await _supabase.from('profiles').select('id, name, role, email, hourly_rate, banked_hours').order('name');
     if (r.error) return dbErr(r.error.message);
-    return ok(r.data.map(function(row){ return Object.assign(mapProfile(row), { email: '' }); }));
+    return ok(r.data.map(mapProfile));
   }
 
   async function updateProfile(id, patch) {

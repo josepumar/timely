@@ -3,7 +3,7 @@
 A small web app for a family-managed business: employees log weekly time, submit for approval, and track expenses. An admin reviews, approves or rejects, and generates billing reports.
 
 **Live site:** https://josepumar.github.io/timely  
-**Current version:** v0.5.1  
+**Current version:** v0.5.2  
 **Stack:** Vanilla JS (single IIFE bundle, no build step) · Supabase (auth + Postgres + RLS) · GitHub Pages
 
 ---
