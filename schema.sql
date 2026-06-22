@@ -98,6 +98,43 @@ drop policy if exists "admin insert audit" on audit_log;
 create policy "admin read audit"   on audit_log for select using (is_admin());
 create policy "admin insert audit" on audit_log for insert with check (is_admin());
 
+create table if not exists reports (
+  id          uuid default uuid_generate_v4() primary key,
+  name        text not null,
+  include_all boolean not null default true,
+  created_by  uuid references profiles(id),
+  created_at  timestamptz default now()
+);
+
+create table if not exists report_employees (
+  report_id uuid references reports(id) on delete cascade,
+  user_id   uuid references profiles(id) on delete cascade,
+  primary key (report_id, user_id)
+);
+
+create table if not exists report_snapshots (
+  id            uuid default uuid_generate_v4() primary key,
+  report_id     uuid references reports(id) on delete cascade,
+  generated_by  uuid references profiles(id),
+  generated_at  timestamptz default now(),
+  date_from     date not null,
+  date_to       date not null,
+  ot_multiplier numeric(4,2) not null,
+  output_json   jsonb not null
+);
+
+alter table reports          enable row level security;
+alter table report_employees enable row level security;
+alter table report_snapshots enable row level security;
+
+drop policy if exists "admin manage reports"   on reports;
+drop policy if exists "admin manage re"        on report_employees;
+drop policy if exists "admin manage snapshots" on report_snapshots;
+
+create policy "admin manage reports"   on reports          for all using (is_admin());
+create policy "admin manage re"        on report_employees for all using (is_admin());
+create policy "admin manage snapshots" on report_snapshots for all using (is_admin());
+
 -- ─── Trigger: auto-create profile on sign-up ──────────────────────────────────
 
 create or replace function handle_new_user()

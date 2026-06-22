@@ -3,7 +3,7 @@
 A small web app for a family-managed business: employees log weekly time, submit for approval, and track expenses. An admin reviews, approves or rejects, and generates billing reports.
 
 **Live site:** https://josepumar.github.io/timely  
-**Current version:** v0.4  
+**Current version:** v0.5  
 **Stack:** Vanilla JS (single IIFE bundle, no build step) · Supabase (auth + Postgres + RLS) · GitHub Pages
 
 ---
@@ -27,6 +27,7 @@ A small web app for a family-managed business: employees log weekly time, submit
    -- approval note column (added in v0.3)
    alter table timesheets add column if not exists approval_note text;
 
+   -- v0.4: returned status + audit log
    -- returned status + audit log (added in v0.4)
    alter table timesheets drop constraint if exists timesheets_status_check;
    alter table timesheets add constraint timesheets_status_check
@@ -55,6 +56,36 @@ A small web app for a family-managed business: employees log weekly time, submit
    drop policy if exists "admin insert audit" on audit_log;
    create policy "admin read audit"   on audit_log for select using (is_admin());
    create policy "admin insert audit" on audit_log for insert with check (is_admin());
+
+   -- v0.5: saved reports + snapshots
+   create table if not exists reports (
+     id          uuid default uuid_generate_v4() primary key,
+     name        text not null,
+     include_all boolean not null default true,
+     created_by  uuid references profiles(id),
+     created_at  timestamptz default now()
+   );
+   create table if not exists report_employees (
+     report_id uuid references reports(id) on delete cascade,
+     user_id   uuid references profiles(id) on delete cascade,
+     primary key (report_id, user_id)
+   );
+   create table if not exists report_snapshots (
+     id            uuid default uuid_generate_v4() primary key,
+     report_id     uuid references reports(id) on delete cascade,
+     generated_by  uuid references profiles(id),
+     generated_at  timestamptz default now(),
+     date_from     date not null,
+     date_to       date not null,
+     ot_multiplier numeric(4,2) not null,
+     output_json   jsonb not null
+   );
+   alter table reports          enable row level security;
+   alter table report_employees enable row level security;
+   alter table report_snapshots enable row level security;
+   create policy "admin manage reports"   on reports          for all using (is_admin());
+   create policy "admin manage re"        on report_employees for all using (is_admin());
+   create policy "admin manage snapshots" on report_snapshots for all using (is_admin());
    ```
 6. Set your Supabase project URL and anon key in `bundle.js` (lines 46–47, constants `SUPABASE_URL` and `SUPABASE_ANON_KEY`).
 
@@ -122,7 +153,8 @@ When `SUPABASE_URL` is blank the app falls back to mock data with password `pass
 - **Charge Codes** — add, inline-edit, deactivate/reactivate
 - **Expense Categories** — same management UI
 - **Users & Roles** — inline-edit name, email, role, hourly rate, banked hours
-- **Billing Report** — date-range report of all approved timesheets and expenses, grouped by employee with labor + expense subtotals and grand total
+- **Billing Report** — one-off date-range report of all approved timesheets and expenses, grouped by employee with labor + expense subtotals and grand total; Print / Save as PDF
+- **Reports** — saved report templates, each with a name and an employee scope (all or a named subset); generate a dated snapshot from any template; snapshots store the full billing output as a frozen JSON blob so the result never changes after generation; view past snapshots at any time
 - **Settings** — admin notification email, OT threshold hours, OT pay multiplier (persisted to `app_settings` table)
 
 ### Statuses
@@ -215,10 +247,13 @@ Deleting a draft expense has no "are you sure?" prompt. Rejecting a timesheet na
 ### 3. Pagination on Pending Approvals / Pending Expenses
 Currently all submitted timesheets and expenses are loaded at once. For a larger team this could get long. The Expenses list already has 20-per-page pagination — the admin pending lists could use the same pattern.
 
-### 4. Returned expenses not editable by employee (two-part bug)
+### 4. Reports: date preferences not yet configurable per template
+Currently the date range is chosen at generate time (same as the one-off Billing Report). A future enhancement would let each report template store preferred date settings (e.g. "always current month", "always last 30 days") so generating is one click.
+
+### 5. Returned expenses not editable by employee (two-part bug)
 When an admin sends an expense back with status `returned`, the employee cannot edit or resubmit it:
 - **bundle.js** — the employee expenses list only checks `status === 'draft' || status === 'rejected'` for showing Edit/Submit buttons; needs `|| status === 'returned'`.
-- **schema.sql / Supabase RLS** — the `expenses` `update own draft` policy uses `status = 'draft'`; needs to include `'rejected'` and `'returned'` to match the timesheets policy. Run in the SQL Editor:
+- **schema.sql / Supabase RLS** — the `expenses` `update own draft` policy uses `status = 'draft'`; needs to include `'rejected'` and `'returned'` to match the timesheet policy. Run in the SQL Editor:
   ```sql
   drop policy if exists "update own draft" on expenses;
   create policy "update own draft" on expenses for update

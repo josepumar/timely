@@ -46,7 +46,7 @@
   const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
 
-  const VERSION = '0.4';
+  const VERSION = '0.5';
   const OT_THRESHOLD_HOURS    = 40;
   const WEEK_START_DAY        = 6;
   // Runtime values — overwritten by loadAppSettings() on startup
@@ -275,6 +275,12 @@
     { id: 'al9', entityType: 'expense',   entityId: 'exp3', action: 'submitted', byId: 'u2', byName: 'Bob Jones',   at: '2026-06-09T11:00:00Z', note: '' },
     { id: 'al10',entityType: 'expense',   entityId: 'exp3', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-10T15:00:00Z', note: '' },
   ];
+
+  let _dbReports = [
+    { id: 'rep1', name: 'Full Team', includeAll: true, createdBy: 'u3', createdAt: '2026-01-01T00:00:00Z' }
+  ];
+  let _dbReportEmployees = [];
+  let _dbReportSnapshots = [];
 
   function dbAppendAudit(entityType, entityId, action, byId, note) {
     var user = MOCK_USERS.find(function(u){ return u.id === byId; });
@@ -819,6 +825,152 @@
     return ok(true);
   }
 
+  // ─── Report DB Functions ──────────────────────────────────────────────────
+  async function getReports() {
+    if (!_supabase) {
+      return ok(_dbReports.map(function(r) {
+        var empIds = _dbReportEmployees.filter(function(re){ return re.reportId === r.id; }).map(function(re){ return re.userId; });
+        return Object.assign({}, r, { employeeIds: empIds });
+      }));
+    }
+    var r = await _supabase.from('reports').select('*, report_employees(user_id)').order('created_at', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    return ok(r.data.map(function(row){
+      return { id: row.id, name: row.name, includeAll: row.include_all, createdBy: row.created_by, createdAt: row.created_at,
+               employeeIds: (row.report_employees || []).map(function(re){ return re.user_id; }) };
+    }));
+  }
+
+  async function createReport(name, includeAll, employeeIds) {
+    var user = currentUser();
+    if (!_supabase) {
+      var newRep = { id: dbNewId(), name: name.trim(), includeAll: !!includeAll, createdBy: user ? user.id : null, createdAt: new Date().toISOString() };
+      _dbReports.push(newRep);
+      if (!includeAll && employeeIds && employeeIds.length > 0) {
+        employeeIds.forEach(function(uid){ _dbReportEmployees.push({ reportId: newRep.id, userId: uid }); });
+      }
+      var empIds = _dbReportEmployees.filter(function(re){ return re.reportId === newRep.id; }).map(function(re){ return re.userId; });
+      return ok(Object.assign({}, newRep, { employeeIds: empIds }));
+    }
+    var r = await _supabase.from('reports').insert({ name: name.trim(), include_all: !!includeAll, created_by: user ? user.id : null }).select().single();
+    if (r.error) return dbErr(r.error.message);
+    if (!includeAll && employeeIds && employeeIds.length > 0) {
+      var rows = employeeIds.map(function(uid){ return { report_id: r.data.id, user_id: uid }; });
+      await _supabase.from('report_employees').insert(rows);
+    }
+    return ok({ id: r.data.id, name: r.data.name, includeAll: r.data.include_all, createdBy: r.data.created_by,
+                createdAt: r.data.created_at, employeeIds: includeAll ? [] : (employeeIds || []) });
+  }
+
+  async function updateReport(id, name, includeAll, employeeIds) {
+    if (!_supabase) {
+      var idx = _dbReports.findIndex(function(r){ return r.id === id; });
+      if (idx === -1) return dbErr('Report not found');
+      _dbReports[idx] = Object.assign({}, _dbReports[idx], { name: name.trim(), includeAll: !!includeAll });
+      _dbReportEmployees = _dbReportEmployees.filter(function(re){ return re.reportId !== id; });
+      if (!includeAll && employeeIds && employeeIds.length > 0) {
+        employeeIds.forEach(function(uid){ _dbReportEmployees.push({ reportId: id, userId: uid }); });
+      }
+      var empIds = _dbReportEmployees.filter(function(re){ return re.reportId === id; }).map(function(re){ return re.userId; });
+      return ok(Object.assign({}, _dbReports[idx], { employeeIds: empIds }));
+    }
+    var r = await _supabase.from('reports').update({ name: name.trim(), include_all: !!includeAll }).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    await _supabase.from('report_employees').delete().eq('report_id', id);
+    if (!includeAll && employeeIds && employeeIds.length > 0) {
+      var rows = employeeIds.map(function(uid){ return { report_id: id, user_id: uid }; });
+      await _supabase.from('report_employees').insert(rows);
+    }
+    return ok({ id: r.data.id, name: r.data.name, includeAll: r.data.include_all, createdBy: r.data.created_by,
+                createdAt: r.data.created_at, employeeIds: includeAll ? [] : (employeeIds || []) });
+  }
+
+  async function deleteReport(id) {
+    if (!_supabase) {
+      var idx = _dbReports.findIndex(function(r){ return r.id === id; });
+      if (idx === -1) return dbErr('Report not found');
+      _dbReports.splice(idx, 1);
+      _dbReportEmployees = _dbReportEmployees.filter(function(re){ return re.reportId !== id; });
+      _dbReportSnapshots = _dbReportSnapshots.filter(function(s){ return s.reportId !== id; });
+      return ok(true);
+    }
+    var r = await _supabase.from('reports').delete().eq('id', id);
+    if (r.error) return dbErr(r.error.message);
+    return ok(true);
+  }
+
+  async function getReportSnapshots(reportId) {
+    if (!_supabase) {
+      var snaps = _dbReportSnapshots
+        .filter(function(s){ return s.reportId === reportId; })
+        .sort(function(a, b){ return b.generatedAt.localeCompare(a.generatedAt); })
+        .map(function(s){
+          var u = MOCK_USERS.find(function(x){ return x.id === s.generatedBy; });
+          return { id: s.id, reportId: s.reportId, generatedBy: s.generatedBy,
+                   generatedByName: u ? u.name : 'Unknown', generatedAt: s.generatedAt,
+                   dateFrom: s.dateFrom, dateTo: s.dateTo, otMultiplier: s.otMultiplier,
+                   grandTotal: s.outputJson ? (s.outputJson.grandTotal || 0) : 0 };
+        });
+      return ok(snaps);
+    }
+    var r = await _supabase.from('report_snapshots')
+      .select('id, report_id, generated_by, generated_at, date_from, date_to, ot_multiplier, output_json, profiles(name)')
+      .eq('report_id', reportId)
+      .order('generated_at', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    return ok((r.data || []).map(function(row){
+      return { id: row.id, reportId: row.report_id, generatedBy: row.generated_by,
+               generatedByName: row.profiles ? row.profiles.name : 'Unknown',
+               generatedAt: row.generated_at, dateFrom: row.date_from, dateTo: row.date_to,
+               otMultiplier: row.ot_multiplier,
+               grandTotal: row.output_json ? (row.output_json.grandTotal || 0) : 0 };
+    }));
+  }
+
+  async function saveReportSnapshot(reportId, dateFrom, dateTo, otMultiplier, outputJson) {
+    var user = currentUser();
+    if (!_supabase) {
+      var snap = { id: dbNewId(), reportId: reportId, generatedBy: user ? user.id : null,
+                   generatedAt: new Date().toISOString(), dateFrom: dateFrom, dateTo: dateTo,
+                   otMultiplier: otMultiplier, outputJson: outputJson };
+      _dbReportSnapshots.push(snap);
+      return ok({ id: snap.id });
+    }
+    var r = await _supabase.from('report_snapshots').insert({
+      report_id: reportId, generated_by: user ? user.id : null,
+      date_from: dateFrom, date_to: dateTo, ot_multiplier: otMultiplier, output_json: outputJson
+    }).select('id').single();
+    if (r.error) return dbErr(r.error.message);
+    return ok({ id: r.data.id });
+  }
+
+  async function deleteReportSnapshot(id) {
+    if (!_supabase) {
+      var idx = _dbReportSnapshots.findIndex(function(s){ return s.id === id; });
+      if (idx === -1) return dbErr('Snapshot not found');
+      _dbReportSnapshots.splice(idx, 1);
+      return ok(true);
+    }
+    var r = await _supabase.from('report_snapshots').delete().eq('id', id);
+    if (r.error) return dbErr(r.error.message);
+    return ok(true);
+  }
+
+  async function getReportSnapshot(id) {
+    if (!_supabase) {
+      var s = _dbReportSnapshots.find(function(x){ return x.id === id; });
+      if (!s) return dbErr('Snapshot not found');
+      var u = MOCK_USERS.find(function(x){ return x.id === s.generatedBy; });
+      return ok(Object.assign({}, s, { generatedByName: u ? u.name : 'Unknown' }));
+    }
+    var r = await _supabase.from('report_snapshots').select('*, profiles(name)').eq('id', id).single();
+    if (r.error) return dbErr(r.error.message);
+    return ok({ id: r.data.id, reportId: r.data.report_id, generatedBy: r.data.generated_by,
+                generatedByName: r.data.profiles ? r.data.profiles.name : 'Unknown',
+                generatedAt: r.data.generated_at, dateFrom: r.data.date_from, dateTo: r.data.date_to,
+                otMultiplier: r.data.ot_multiplier, outputJson: r.data.output_json });
+  }
+
   // ─── Timesheet Rows (shared read-only renderer) ───────────────────────────
   function entryRowReadonlyHtml(entry, chargeCodes) {
     var cc  = chargeCodes.find(function(c){ return c.id === entry.chargeCodeId; });
@@ -876,6 +1028,7 @@
             adminNavItem('#/admin/expense-categories', 'Expense Categories', currentHash) +
             adminNavItem('#/admin/users',              'Users',              currentHash) +
             adminNavItem('#/admin/billing',            'Billing Report',     currentHash) +
+            adminNavItem('#/admin/reports',            'Reports',            currentHash) +
             adminNavItem('#/admin/settings',           'Settings',           currentHash) +
           '</ul>' +
           '<div class="admin-sidebar__footer">' +
@@ -2489,6 +2642,206 @@
     }).join('');
   }
 
+  // ─── Billing Helpers (shared by Billing Report and Reports snapshots) ───────
+  async function generateBillingData(employeeFilter, dateFrom, dateTo, otMultiplier) {
+    var usersRes  = await getUsers();
+    var employees = (usersRes.data || []).filter(function(u){ return u.role === 'employee'; });
+    if (employeeFilter && employeeFilter.length > 0) {
+      employees = employees.filter(function(u){ return employeeFilter.indexOf(u.id) !== -1; });
+    }
+
+    var inRange = [], inRangeExpenses = [];
+    if (_supabase) {
+      var results = await Promise.all([
+        _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('status', 'approved').gte('week_start', dateFrom).lte('week_start', dateTo).order('week_start'),
+        _supabase.from('expenses').select('*, expense_categories(name)').eq('status', 'approved').gte('date', dateFrom).lte('date', dateTo)
+      ]);
+      if (results[0].error || results[1].error) return { error: ((results[0].error || results[1].error).message) };
+      inRange = (results[0].data || []).map(function(row){ return Object.assign(mapTimesheet(row), { _entries: (row.timesheet_entries || []).map(mapEntry) }); });
+      inRangeExpenses = (results[1].data || []).map(function(row){
+        return Object.assign(mapExpense(row), { categoryName: (row.expense_categories && row.expense_categories.name) || '—' });
+      });
+    } else {
+      inRange = _dbTimesheets.filter(function(ts){ return ts.status === 'approved' && ts.weekStart >= dateFrom && ts.weekStart <= dateTo; })
+        .sort(function(a, b){ return a.weekStart.localeCompare(b.weekStart); });
+      inRangeExpenses = _dbExpenses.filter(function(ex){ return ex.status === 'approved' && ex.date >= dateFrom && ex.date <= dateTo; })
+        .map(function(ex){
+          var cat = _dbExpenseCategories.find(function(c){ return c.id === ex.categoryId; });
+          return Object.assign({}, ex, { categoryName: cat ? cat.name : '—' });
+        });
+    }
+
+    if (employeeFilter && employeeFilter.length > 0) {
+      inRange         = inRange.filter(function(ts){ return employeeFilter.indexOf(ts.userId) !== -1; });
+      inRangeExpenses = inRangeExpenses.filter(function(ex){ return employeeFilter.indexOf(ex.userId) !== -1; });
+    }
+
+    var grandTotalLabor = 0, grandTotalExpenses = 0, grandRegHrs = 0, grandOtHrs = 0;
+    var empData = [];
+
+    employees.forEach(function(emp) {
+      var empSheets   = inRange.filter(function(ts){ return ts.userId === emp.id; });
+      var empExpenses = inRangeExpenses.filter(function(ex){ return ex.userId === emp.id; })
+        .sort(function(a, b){ return a.date.localeCompare(b.date); });
+      if (empSheets.length === 0 && empExpenses.length === 0) return;
+
+      var rate = emp.hourlyRate || 0;
+      var otRate = rate * otMultiplier;
+      var empRegTotal = 0, empOtTotal = 0, empLaborAmt = 0;
+
+      var weeks = empSheets.map(function(ts) {
+        var entries  = ts._entries || _dbEntries.filter(function(e){ return e.timesheetId === ts.id; });
+        var tots     = weeklyTotals(entries);
+        var regAmt   = tots.regular  * rate;
+        var otAmt    = tots.overtime * otRate;
+        var lineTotal = regAmt + otAmt;
+        empRegTotal += tots.regular;
+        empOtTotal  += tots.overtime;
+        empLaborAmt += lineTotal;
+        return { weekStart: ts.weekStart, regular: tots.regular, overtime: tots.overtime, total: tots.total,
+                 regularAmt: regAmt, overtimeAmt: otAmt, lineTotal: lineTotal };
+      });
+
+      var expenseSubtotal = empExpenses.reduce(function(s, ex){ return s + (ex.amount || 0); }, 0);
+      var employeeTotal   = empLaborAmt + expenseSubtotal;
+      grandTotalLabor    += empLaborAmt;
+      grandTotalExpenses += expenseSubtotal;
+      grandRegHrs        += empRegTotal;
+      grandOtHrs         += empOtTotal;
+
+      empData.push({
+        id: emp.id, name: emp.name, hourlyRate: rate, otRate: otRate,
+        weeks: weeks, laborSubtotal: empLaborAmt,
+        expenses: empExpenses.map(function(ex){ return { date: ex.date, category: ex.categoryName, description: ex.description, amount: ex.amount }; }),
+        expenseSubtotal: expenseSubtotal, employeeTotal: employeeTotal
+      });
+    });
+
+    return { dateFrom: dateFrom, dateTo: dateTo, otMultiplier: otMultiplier, employees: empData,
+             grandTotalLabor: grandTotalLabor, grandTotalExpenses: grandTotalExpenses,
+             grandTotal: grandTotalLabor + grandTotalExpenses, grandRegHrs: grandRegHrs, grandOtHrs: grandOtHrs };
+  }
+
+  function renderBillingHtml(data, opts) {
+    opts = opts || {};
+    if (!data || !data.employees || data.employees.length === 0) {
+      return '<div class="empty-state" style="padding:var(--space-12)"><p>No approved timesheets or expenses in this period.</p><small>Approve timesheets or expenses first, then generate the report.</small></div>';
+    }
+    var mult = data.otMultiplier;
+    var html = '<div id="rpt-table">';
+
+    data.employees.forEach(function(emp) {
+      var rate   = emp.hourlyRate;
+      var otRate = emp.otRate;
+
+      var weekRows = emp.weeks.map(function(w) {
+        return '<tr>' +
+          '<td data-label="Week">'                                               + formatWeekShort(w.weekStart)  + '</td>' +
+          '<td data-label="Reg. Hrs" style="text-align:right">'                 + fmtHours(w.regular)           + '</td>' +
+          '<td data-label="OT Hrs" style="text-align:right">'                   + fmtHours(w.overtime)          + '</td>' +
+          '<td data-label="Total Hrs" style="text-align:right">'                + fmtHours(w.total)             + '</td>' +
+          '<td data-label="Reg. Amount" style="text-align:right">'              + fmtMoney(w.regularAmt)        + '</td>' +
+          '<td data-label="OT Amount" style="text-align:right">'                + fmtMoney(w.overtimeAmt)       + '</td>' +
+          '<td data-label="Line Total" style="text-align:right;font-weight:600">' + fmtMoney(w.lineTotal)       + '</td>' +
+        '</tr>';
+      }).join('');
+
+      var rateNote = rate > 0
+        ? fmtMoney(rate) + '/h' + (mult > 1 ? '&nbsp;&nbsp;·&nbsp;&nbsp;OT: ' + fmtMoney(otRate) + '/h (' + mult + '&times;)' : '')
+        : '<span style="color:var(--color-warning)">Hourly rate not set</span>';
+
+      var expSection = '';
+      if (emp.expenses.length > 0) {
+        var expRows = emp.expenses.map(function(ex) {
+          return '<tr>' +
+            '<td data-label="Date">'                        + esc(ex.date)                         + '</td>' +
+            '<td data-label="Category">'                    + esc(ex.category || '—')              + '</td>' +
+            '<td data-label="Description" colspan="2">'     + esc(ex.description)                  + '</td>' +
+            '<td data-label="Amount" style="text-align:right;font-weight:600">' + fmtMoney(ex.amount) + '</td>' +
+          '</tr>';
+        }).join('');
+        expSection =
+          '<div style="margin-top:var(--space-4)">' +
+            '<h3 style="font-size:var(--font-size-sm);text-transform:uppercase;letter-spacing:0.05em;color:var(--color-neutral-500);margin-bottom:var(--space-2)">Expenses (approved)</h3>' +
+            '<div class="table-wrapper">' +
+              '<table class="data-table" aria-label="Expenses for ' + esc(emp.name) + '">' +
+                '<thead><tr><th scope="col">Date</th><th scope="col">Category</th><th scope="col" colspan="2">Description</th><th scope="col" style="text-align:right">Amount</th></tr></thead>' +
+                '<tbody>' + expRows + '</tbody>' +
+                '<tfoot><tr style="background:var(--color-neutral-50)">' +
+                  '<td colspan="4" style="font-weight:600">Expense Subtotal</td>' +
+                  '<td style="text-align:right;font-weight:700;color:var(--color-primary)">' + fmtMoney(emp.expenseSubtotal) + '</td>' +
+                '</tr></tfoot>' +
+              '</table>' +
+            '</div>' +
+          '</div>';
+      }
+
+      var empRegTotal = emp.weeks.reduce(function(s, w){ return s + w.regular; }, 0);
+      var empOtTotal  = emp.weeks.reduce(function(s, w){ return s + w.overtime; }, 0);
+
+      var totalLine = emp.expenseSubtotal > 0
+        ? '<div style="text-align:right;margin-top:var(--space-3);padding-top:var(--space-3);border-top:2px solid var(--color-neutral-200);font-size:var(--font-size-sm);color:var(--color-neutral-600)">' +
+            'Labor: <strong>' + fmtMoney(emp.laborSubtotal) + '</strong>' +
+            '&nbsp;&nbsp;+&nbsp;&nbsp;Expenses: <strong>' + fmtMoney(emp.expenseSubtotal) + '</strong>' +
+            '&nbsp;&nbsp;=&nbsp;&nbsp;<span style="font-size:var(--font-size-lg);font-weight:700;color:var(--color-primary)">' + fmtMoney(emp.employeeTotal) + '</span>' +
+          '</div>'
+        : '';
+
+      html +=
+        '<div class="section-card" style="margin-top:var(--space-4);page-break-inside:avoid">' +
+          '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:var(--space-4);flex-wrap:wrap;gap:var(--space-2)">' +
+            '<h2 style="margin:0;font-size:var(--font-size-lg)">' + esc(emp.name) + '</h2>' +
+            '<span style="font-size:var(--font-size-sm);color:var(--color-neutral-500)">' + rateNote + '</span>' +
+          '</div>' +
+          (emp.weeks.length > 0
+            ? '<div class="table-wrapper">' +
+                '<table class="data-table" aria-label="Labor billing for ' + esc(emp.name) + '">' +
+                  '<thead><tr>' +
+                    '<th scope="col">Week</th>' +
+                    '<th scope="col" style="text-align:right">Reg. Hrs</th>' +
+                    '<th scope="col" style="text-align:right">OT Hrs</th>' +
+                    '<th scope="col" style="text-align:right">Total Hrs</th>' +
+                    '<th scope="col" style="text-align:right">Reg. Amount</th>' +
+                    '<th scope="col" style="text-align:right">OT Amount</th>' +
+                    '<th scope="col" style="text-align:right">Line Total</th>' +
+                  '</tr></thead>' +
+                  '<tbody>' + weekRows + '</tbody>' +
+                  '<tfoot><tr style="background:var(--color-neutral-50)">' +
+                    '<td style="font-weight:600">Labor Subtotal</td>' +
+                    '<td style="text-align:right;font-weight:600">' + fmtHours(empRegTotal) + '</td>' +
+                    '<td style="text-align:right;font-weight:600">' + fmtHours(empOtTotal)  + '</td>' +
+                    '<td style="text-align:right;font-weight:600">' + fmtHours(empRegTotal + empOtTotal) + '</td>' +
+                    '<td></td><td></td>' +
+                    '<td style="text-align:right;font-weight:700;color:var(--color-primary)">' + fmtMoney(emp.laborSubtotal) + '</td>' +
+                  '</tr></tfoot>' +
+                '</table>' +
+              '</div>'
+            : '') +
+          expSection + totalLine +
+        '</div>';
+    });
+
+    html +=
+      '<div style="background:var(--color-neutral-900);color:white;border-radius:var(--radius-md);padding:var(--space-4) var(--space-6);margin-top:var(--space-6);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--space-3)">' +
+        '<div>' +
+          '<div style="font-size:var(--font-size-lg);font-weight:700">Grand Total</div>' +
+          '<div style="font-size:var(--font-size-sm);color:var(--color-neutral-400);margin-top:2px">' +
+            fmtHours(data.grandRegHrs) + ' reg + ' + fmtHours(data.grandOtHrs) + ' OT = ' + fmtHours(data.grandRegHrs + data.grandOtHrs) + ' h labor' +
+            (data.grandTotalExpenses > 0 ? '&nbsp;&nbsp;·&nbsp;&nbsp;Expenses: ' + fmtMoney(data.grandTotalExpenses) : '') +
+          '</div>' +
+        '</div>' +
+        '<span style="font-size:var(--font-size-3xl);font-weight:700">' + fmtMoney(data.grandTotal) + '</span>' +
+      '</div>' +
+      (opts.showPrint !== false
+        ? '<div style="text-align:right;margin-top:var(--space-4);padding-bottom:var(--space-8)">' +
+            '<button class="btn btn--secondary billing-print-btn">Print / Save as PDF</button>' +
+          '</div>'
+        : '');
+
+    html += '</div>';
+    return html;
+  }
+
   // ─── Billing Report ───────────────────────────────────────────────────────
   async function adminBillingRender(root) {
     var main = renderAdminShell(root, '#/admin/billing', 'Billing Report');
@@ -2497,13 +2850,9 @@
       return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     }
 
-    function fmtMoney(n) {
-      return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0);
-    }
-
-    var today        = new Date();
-    var defaultFrom  = toIso(new Date(today.getFullYear(), today.getMonth(), 1));
-    var defaultTo    = toIso(new Date(today.getFullYear(), today.getMonth() + 1, 0));
+    var today       = new Date();
+    var defaultFrom = toIso(new Date(today.getFullYear(), today.getMonth(), 1));
+    var defaultTo   = toIso(new Date(today.getFullYear(), today.getMonth() + 1, 0));
 
     main.insertAdjacentHTML('beforeend',
       '<div class="section-card" style="margin-top:0">' +
@@ -2529,195 +2878,378 @@
       var mult = parseFloat(main.querySelector('#rpt-mult').value);
       if (!isFinite(mult) || mult < 1) mult = 1;
       var out  = main.querySelector('#rpt-output');
-
       if (!from || !to || from > to) {
         out.innerHTML = '<p style="color:var(--color-danger);padding:var(--space-4)">Please select a valid date range.</p>';
         return;
       }
-
-      var usersRes  = await getUsers();
-      var employees = (usersRes.data || []).filter(function(u) { return u.role === 'employee'; });
-
-      var _billTsRaw = [], _billExpRaw = [];
-      if (_supabase) {
-        var _billResults = await Promise.all([
-          _supabase.from('timesheets').select('*, timesheet_entries(*)').eq('status', 'approved').gte('week_start', from).lte('week_start', to).order('week_start'),
-          _supabase.from('expenses').select('*, expense_categories(name)').eq('status', 'approved').gte('date', from).lte('date', to)
-        ]);
-        if (_billResults[0].error) { out.innerHTML = '<p style="color:var(--color-danger);padding:var(--space-4)">Error: ' + esc(_billResults[0].error.message) + '</p>'; return; }
-        if (_billResults[1].error) { out.innerHTML = '<p style="color:var(--color-danger);padding:var(--space-4)">Error: ' + esc(_billResults[1].error.message) + '</p>'; return; }
-        _billTsRaw  = _billResults[0].data || [];
-        _billExpRaw = _billResults[1].data || [];
-      }
-
-      var inRange = _supabase
-        ? _billTsRaw.map(function(row){ return Object.assign(mapTimesheet(row), { _entries: (row.timesheet_entries || []).map(mapEntry) }); })
-        : _dbTimesheets.filter(function(ts){ return ts.status === 'approved' && ts.weekStart >= from && ts.weekStart <= to; }).sort(function(a, b){ return a.weekStart.localeCompare(b.weekStart); });
-
-      var inRangeExpenses = _supabase
-        ? _billExpRaw.map(function(row){ return Object.assign(mapExpense(row), { categoryName: (row.expense_categories && row.expense_categories.name) || '—' }); })
-        : _dbExpenses.filter(function(ex){ return ex.status === 'approved' && ex.date >= from && ex.date <= to; }).map(function(ex){
-            var cat = _dbExpenseCategories.find(function(c){ return c.id === ex.categoryId; });
-            return Object.assign({}, ex, { categoryName: cat ? cat.name : '—' });
-          });
-
-      if (inRange.length === 0 && inRangeExpenses.length === 0) {
-        out.innerHTML = '<div class="empty-state" style="padding:var(--space-12)"><p>No approved timesheets or expenses in this period.</p><small>Approve timesheets or expenses first, then generate the report.</small></div>';
+      var data = await generateBillingData(null, from, to, mult);
+      if (data.error) {
+        out.innerHTML = '<p style="color:var(--color-danger);padding:var(--space-4)">Error: ' + esc(data.error) + '</p>';
         return;
       }
-
-      var grandTotal   = 0;
-      var grandRegHrs  = 0;
-      var grandOtHrs   = 0;
-      var grandExpAmt  = 0;
-      var html = '<div id="rpt-table">';
-
-      employees.forEach(function(emp) {
-        var empSheets   = inRange.filter(function(ts) { return ts.userId === emp.id; });
-        var empExpenses = inRangeExpenses.filter(function(ex) {
-          return ex.userId === emp.id;
-        }).sort(function(a, b){ return a.date.localeCompare(b.date); });
-
-        if (empSheets.length === 0 && empExpenses.length === 0) return;
-
-        var rate   = emp.hourlyRate || 0;
-        var otRate = rate * mult;
-        var empRegTotal = 0, empOtTotal = 0, empLaborAmt = 0;
-
-        var weekRows = empSheets.map(function(ts) {
-          var entries = ts._entries || _dbEntries.filter(function(e) { return e.timesheetId === ts.id; });
-          var tots    = weeklyTotals(entries);
-          var regAmt  = tots.regular  * rate;
-          var otAmt   = tots.overtime * otRate;
-          var lineAmt = regAmt + otAmt;
-          empRegTotal  += tots.regular;
-          empOtTotal   += tots.overtime;
-          empLaborAmt  += lineAmt;
-          return '<tr>' +
-            '<td data-label="Week">'       + formatWeekShort(ts.weekStart) + '</td>' +
-            '<td data-label="Reg. Hrs" style="text-align:right">'    + fmtHours(tots.regular)  + '</td>' +
-            '<td data-label="OT Hrs" style="text-align:right">'      + fmtHours(tots.overtime) + '</td>' +
-            '<td data-label="Total Hrs" style="text-align:right">'   + fmtHours(tots.total)    + '</td>' +
-            '<td data-label="Reg. Amount" style="text-align:right">' + fmtMoney(regAmt)  + '</td>' +
-            '<td data-label="OT Amount" style="text-align:right">'   + fmtMoney(otAmt)   + '</td>' +
-            '<td data-label="Line Total" style="text-align:right;font-weight:600">' + fmtMoney(lineAmt) + '</td>' +
-          '</tr>';
-        }).join('');
-
-        var empExpAmt  = empExpenses.reduce(function(s, ex){ return s + (ex.amount || 0); }, 0);
-        var empAmtTotal = empLaborAmt + empExpAmt;
-
-        grandTotal  += empAmtTotal;
-        grandRegHrs += empRegTotal;
-        grandOtHrs  += empOtTotal;
-        grandExpAmt += empExpAmt;
-
-        var rateNote = rate > 0
-          ? fmtMoney(rate) + '/h' + (mult > 1 ? '&nbsp;&nbsp;·&nbsp;&nbsp;OT: ' + fmtMoney(otRate) + '/h (' + mult + '&times;)' : '')
-          : '<span style="color:var(--color-warning)">Hourly rate not set</span>';
-
-        var expSection = '';
-        if (empExpenses.length > 0) {
-          var expRows = empExpenses.map(function(ex) {
-            return '<tr>' +
-              '<td data-label="Date">'        + esc(ex.date) + '</td>' +
-              '<td data-label="Category">'    + esc(ex.categoryName || '—') + '</td>' +
-              '<td data-label="Description" colspan="2">' + esc(ex.description) + '</td>' +
-              '<td data-label="Amount" style="text-align:right;font-weight:600">' + fmtMoney(ex.amount) + '</td>' +
-            '</tr>';
-          }).join('');
-          expSection =
-            '<div style="margin-top:var(--space-4)">' +
-              '<h3 style="font-size:var(--font-size-sm);text-transform:uppercase;letter-spacing:0.05em;color:var(--color-neutral-500);margin-bottom:var(--space-2)">Expenses (approved)</h3>' +
-              '<div class="table-wrapper">' +
-                '<table class="data-table" aria-label="Expenses for ' + esc(emp.name) + '">' +
-                  '<thead><tr>' +
-                    '<th scope="col">Date</th><th scope="col">Category</th><th scope="col" colspan="2">Description</th>' +
-                    '<th scope="col" style="text-align:right">Amount</th>' +
-                  '</tr></thead>' +
-                  '<tbody>' + expRows + '</tbody>' +
-                  '<tfoot><tr style="background:var(--color-neutral-50)">' +
-                    '<td colspan="4" style="font-weight:600">Expense Subtotal</td>' +
-                    '<td style="text-align:right;font-weight:700;color:var(--color-primary)">' + fmtMoney(empExpAmt) + '</td>' +
-                  '</tr></tfoot>' +
-                '</table>' +
-              '</div>' +
-            '</div>';
-        }
-
-        var totalLine = empExpAmt > 0
-          ? '<div style="text-align:right;margin-top:var(--space-3);padding-top:var(--space-3);border-top:2px solid var(--color-neutral-200);font-size:var(--font-size-sm);color:var(--color-neutral-600)">' +
-              'Labor: <strong>' + fmtMoney(empLaborAmt) + '</strong>' +
-              '&nbsp;&nbsp;+&nbsp;&nbsp;Expenses: <strong>' + fmtMoney(empExpAmt) + '</strong>' +
-              '&nbsp;&nbsp;=&nbsp;&nbsp;<span style="font-size:var(--font-size-lg);font-weight:700;color:var(--color-primary)">' + fmtMoney(empAmtTotal) + '</span>' +
-            '</div>'
-          : '';
-
-        html +=
-          '<div class="section-card" style="margin-top:var(--space-4);page-break-inside:avoid">' +
-            '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:var(--space-4);flex-wrap:wrap;gap:var(--space-2)">' +
-              '<h2 style="margin:0;font-size:var(--font-size-lg)">' + esc(emp.name) + '</h2>' +
-              '<span style="font-size:var(--font-size-sm);color:var(--color-neutral-500)">' + rateNote + '</span>' +
-            '</div>' +
-            (empSheets.length > 0
-              ? '<div class="table-wrapper">' +
-                  '<table class="data-table" aria-label="Labor billing for ' + esc(emp.name) + '">' +
-                    '<thead><tr>' +
-                      '<th scope="col">Week</th>' +
-                      '<th scope="col" style="text-align:right">Reg. Hrs</th>' +
-                      '<th scope="col" style="text-align:right">OT Hrs</th>' +
-                      '<th scope="col" style="text-align:right">Total Hrs</th>' +
-                      '<th scope="col" style="text-align:right">Reg. Amount</th>' +
-                      '<th scope="col" style="text-align:right">OT Amount</th>' +
-                      '<th scope="col" style="text-align:right">Line Total</th>' +
-                    '</tr></thead>' +
-                    '<tbody>' + weekRows + '</tbody>' +
-                    '<tfoot><tr style="background:var(--color-neutral-50)">' +
-                      '<td style="font-weight:600">Labor Subtotal</td>' +
-                      '<td style="text-align:right;font-weight:600">' + fmtHours(empRegTotal) + '</td>' +
-                      '<td style="text-align:right;font-weight:600">' + fmtHours(empOtTotal)  + '</td>' +
-                      '<td style="text-align:right;font-weight:600">' + fmtHours(empRegTotal + empOtTotal) + '</td>' +
-                      '<td></td><td></td>' +
-                      '<td style="text-align:right;font-weight:700;color:var(--color-primary)">' + fmtMoney(empLaborAmt) + '</td>' +
-                    '</tr></tfoot>' +
-                  '</table>' +
-                '</div>'
-              : '') +
-            expSection +
-            totalLine +
-          '</div>';
-      });
-
-      // Grand total bar
-      var grandLaborAmt = grandTotal - grandExpAmt;
-      html +=
-        '<div style="background:var(--color-neutral-900);color:white;border-radius:var(--radius-md);padding:var(--space-4) var(--space-6);margin-top:var(--space-6);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--space-3)">' +
-          '<div>' +
-            '<div style="font-size:var(--font-size-lg);font-weight:700">Grand Total</div>' +
-            '<div style="font-size:var(--font-size-sm);color:var(--color-neutral-400);margin-top:2px">' +
-              fmtHours(grandRegHrs) + ' reg + ' + fmtHours(grandOtHrs) + ' OT = ' + fmtHours(grandRegHrs + grandOtHrs) + ' h labor' +
-              (grandExpAmt > 0 ? '&nbsp;&nbsp;·&nbsp;&nbsp;Expenses: ' + fmtMoney(grandExpAmt) : '') +
-            '</div>' +
-          '</div>' +
-          '<span style="font-size:var(--font-size-3xl);font-weight:700">' + fmtMoney(grandTotal) + '</span>' +
-        '</div>' +
-        '<div style="text-align:right;margin-top:var(--space-4);padding-bottom:var(--space-8)">' +
-          '<button class="btn btn--secondary billing-print-btn">Print / Save as PDF</button>' +
-        '</div>';
-
-      html += '</div>';
-      out.innerHTML = html;
-      out.querySelector('.billing-print-btn').addEventListener('click', function() { window.print(); });
+      out.innerHTML = renderBillingHtml(data, { showPrint: true });
+      var printBtn = out.querySelector('.billing-print-btn');
+      if (printBtn) printBtn.addEventListener('click', function(){ window.print(); });
     }
 
     main.querySelector('#gen-btn').addEventListener('click', generate);
-
-    // Also re-generate when Enter is pressed in any input
     main.querySelectorAll('#rpt-from, #rpt-to, #rpt-mult').forEach(function(el) {
-      el.addEventListener('keydown', function(e) { if (e.key === 'Enter') generate(); });
+      el.addEventListener('keydown', function(e){ if (e.key === 'Enter') generate(); });
+    });
+    generate();
+  }
+
+  // ─── Reports List ─────────────────────────────────────────────────────────
+  async function adminReportsRender(root) {
+    var main = renderAdminShell(root, '#/admin/reports', 'Reports');
+
+    var [usersRes, reportsRes] = await Promise.all([getUsers(), getReports()]);
+    var employees = (usersRes.data || []).filter(function(u){ return u.role === 'employee'; });
+    var reports   = reportsRes.data || [];
+    var editingId = null;
+    var showForm  = false;
+
+    function employeeLabel(rep) {
+      if (rep.includeAll) return 'All employees';
+      var names = rep.employeeIds.map(function(uid){
+        var u = employees.find(function(e){ return e.id === uid; });
+        return u ? u.name : uid;
+      });
+      return names.length ? names.join(', ') : 'None selected';
+    }
+
+    function empCheckboxes(selectedIds, prefix) {
+      return employees.map(function(u) {
+        var checked = selectedIds.indexOf(u.id) !== -1 ? 'checked' : '';
+        return '<label style="display:flex;align-items:center;gap:var(--space-2);font-weight:normal;margin-bottom:var(--space-1)">' +
+          '<input type="checkbox" class="' + prefix + '-emp-cb" value="' + esc(u.id) + '" ' + checked + '>' + esc(u.name) +
+        '</label>';
+      }).join('');
+    }
+
+    function getChecked(prefix) {
+      return Array.from(main.querySelectorAll('.' + prefix + '-emp-cb:checked')).map(function(cb){ return cb.value; });
+    }
+
+    function createFormHtml() {
+      return '<div class="section-card" style="margin-top:var(--space-4);max-width:32rem" id="create-form">' +
+        '<h2 style="margin-top:0">New Report</h2>' +
+        '<div class="form-group"><label for="rep-name">Name</label>' +
+          '<input id="rep-name" class="input" type="text" placeholder="e.g. Full Team Monthly"></div>' +
+        '<div class="form-group">' +
+          '<label style="display:flex;align-items:center;gap:var(--space-2);font-weight:normal">' +
+            '<input id="rep-all" type="checkbox" checked> Include all employees' +
+          '</label>' +
+        '</div>' +
+        '<div id="create-emp-list" style="display:none;padding-left:var(--space-4);margin-bottom:var(--space-4)">' +
+          empCheckboxes([], 'create') +
+        '</div>' +
+        '<div style="display:flex;gap:var(--space-3)">' +
+          '<button class="btn btn--primary" id="save-rep-btn">Save</button>' +
+          '<button class="btn btn--secondary" id="cancel-rep-btn">Cancel</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function editRowHtml(rep) {
+      return '<tr id="edit-row-' + rep.id + '">' +
+        '<td colspan="4" style="padding:var(--space-3)">' +
+          '<div class="form-group"><label>Name</label>' +
+            '<input class="input edit-rep-name" type="text" value="' + esc(rep.name) + '" style="max-width:20rem"></div>' +
+          '<div class="form-group">' +
+            '<label style="display:flex;align-items:center;gap:var(--space-2);font-weight:normal">' +
+              '<input type="checkbox" class="edit-rep-all" ' + (rep.includeAll ? 'checked' : '') + '> Include all employees' +
+            '</label>' +
+          '</div>' +
+          '<div class="edit-emp-list" style="' + (rep.includeAll ? 'display:none' : '') + ';padding-left:var(--space-4);margin-bottom:var(--space-4)">' +
+            empCheckboxes(rep.employeeIds || [], 'edit') +
+          '</div>' +
+          '<div style="display:flex;gap:var(--space-3)">' +
+            '<button class="btn btn--primary btn--sm save-edit-btn" data-id="' + esc(rep.id) + '">Save</button>' +
+            '<button class="btn btn--secondary btn--sm cancel-edit-btn">Cancel</button>' +
+          '</div>' +
+        '</td>' +
+      '</tr>';
+    }
+
+    function render() {
+      var headerHtml =
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-6)">' +
+          '<p style="margin:0;color:var(--color-neutral-500);font-size:var(--font-size-sm)">Saved report templates. Run one to generate a dated, frozen snapshot.</p>' +
+          (!showForm ? '<button class="btn btn--primary" id="new-rep-btn">+ New Report</button>' : '') +
+        '</div>';
+
+      var contentHtml;
+      if (reports.length === 0 && !showForm) {
+        contentHtml = '<div class="empty-state" style="padding:var(--space-12)"><p>No reports yet.</p><small>Create one to get started.</small></div>';
+      } else {
+        var rows = reports.map(function(rep) {
+          if (editingId === rep.id) return editRowHtml(rep);
+          var created = new Date(rep.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+          return '<tr>' +
+            '<td><strong>' + esc(rep.name) + '</strong></td>' +
+            '<td>' + esc(employeeLabel(rep)) + '</td>' +
+            '<td style="color:var(--color-neutral-400);font-size:var(--font-size-xs)">' + created + '</td>' +
+            '<td><div class="data-table__actions">' +
+              '<a class="btn btn--secondary btn--sm" href="#/admin/report/' + esc(rep.id) + '">Run</a>' +
+              '<button class="btn btn--ghost btn--sm edit-rep-btn" data-id="' + esc(rep.id) + '">Edit</button>' +
+              '<button class="btn btn--ghost btn--sm delete-rep-btn" style="color:var(--color-danger)" data-id="' + esc(rep.id) + '" data-name="' + esc(rep.name) + '">Delete</button>' +
+            '</div></td>' +
+          '</tr>';
+        }).join('');
+        contentHtml = reports.length
+          ? '<div class="table-wrapper"><table class="data-table">' +
+              '<thead><tr><th>Name</th><th>Employees</th><th>Created</th><th style="text-align:right">Actions</th></tr></thead>' +
+              '<tbody>' + rows + '</tbody>' +
+            '</table></div>'
+          : '';
+      }
+
+      main.innerHTML = headerHtml + contentHtml + (showForm ? createFormHtml() : '');
+      wireEvents();
+    }
+
+    function wireEvents() {
+      var newBtn = main.querySelector('#new-rep-btn');
+      if (newBtn) newBtn.addEventListener('click', function(){ showForm = true; editingId = null; render(); });
+
+      var cancelBtn = main.querySelector('#cancel-rep-btn');
+      if (cancelBtn) cancelBtn.addEventListener('click', function(){ showForm = false; render(); });
+
+      var allCb = main.querySelector('#rep-all');
+      if (allCb) allCb.addEventListener('change', function(){
+        main.querySelector('#create-emp-list').style.display = allCb.checked ? 'none' : '';
+      });
+
+      var saveBtn = main.querySelector('#save-rep-btn');
+      if (saveBtn) saveBtn.addEventListener('click', async function(){
+        var name = (main.querySelector('#rep-name') || {}).value.trim();
+        if (!name) { showToast('Name is required', 'error'); return; }
+        var includeAll = main.querySelector('#rep-all').checked;
+        var empIds = includeAll ? [] : getChecked('create');
+        if (!includeAll && empIds.length === 0) { showToast('Select at least one employee or choose "Include all"', 'error'); return; }
+        saveBtn.disabled = true;
+        var r = await createReport(name, includeAll, empIds);
+        saveBtn.disabled = false;
+        if (r.error) { showToast(r.error.message, 'error'); return; }
+        reports.unshift(r.data);
+        showForm = false;
+        render();
+        showToast('Report created', 'success');
+      });
+
+      main.querySelectorAll('.edit-rep-btn').forEach(function(btn){
+        btn.addEventListener('click', function(){ editingId = btn.getAttribute('data-id'); showForm = false; render(); });
+      });
+      main.querySelectorAll('.cancel-edit-btn').forEach(function(btn){
+        btn.addEventListener('click', function(){ editingId = null; render(); });
+      });
+      main.querySelectorAll('.edit-rep-all').forEach(function(cb){
+        cb.addEventListener('change', function(){
+          cb.closest('tr').querySelector('.edit-emp-list').style.display = cb.checked ? 'none' : '';
+        });
+      });
+      main.querySelectorAll('.save-edit-btn').forEach(function(btn){
+        btn.addEventListener('click', async function(){
+          var id  = btn.getAttribute('data-id');
+          var row = btn.closest('tr');
+          var name = row.querySelector('.edit-rep-name').value.trim();
+          if (!name) { showToast('Name is required', 'error'); return; }
+          var includeAll = row.querySelector('.edit-rep-all').checked;
+          var empIds = includeAll ? [] : getChecked('edit');
+          if (!includeAll && empIds.length === 0) { showToast('Select at least one employee or choose "Include all"', 'error'); return; }
+          btn.disabled = true;
+          var r = await updateReport(id, name, includeAll, empIds);
+          btn.disabled = false;
+          if (r.error) { showToast(r.error.message, 'error'); return; }
+          var idx = reports.findIndex(function(x){ return x.id === id; });
+          if (idx !== -1) reports[idx] = r.data;
+          editingId = null;
+          render();
+          showToast('Report updated', 'success');
+        });
+      });
+      main.querySelectorAll('.delete-rep-btn').forEach(function(btn){
+        btn.addEventListener('click', async function(){
+          var id   = btn.getAttribute('data-id');
+          var name = btn.getAttribute('data-name');
+          if (!confirm('Delete "' + name + '" and all its snapshots?')) return;
+          var r = await deleteReport(id);
+          if (r.error) { showToast(r.error.message, 'error'); return; }
+          reports = reports.filter(function(x){ return x.id !== id; });
+          render();
+          showToast('Report deleted', 'success');
+        });
+      });
+    }
+
+    render();
+  }
+
+  // ─── Report Detail (run + snapshots) ─────────────────────────────────────
+  async function adminReportDetailRender(root, params) {
+    var id   = params.id;
+    var main = renderAdminShell(root, '#/admin/reports', null);
+
+    var [reportsRes, usersRes, snapsRes] = await Promise.all([getReports(), getUsers(), getReportSnapshots(id)]);
+    var rep       = (reportsRes.data || []).find(function(r){ return r.id === id; });
+    var employees = (usersRes.data || []).filter(function(u){ return u.role === 'employee'; });
+    var snapshots = snapsRes.data || [];
+
+    if (!rep) {
+      main.innerHTML = '<a href="#/admin/reports" style="color:var(--color-primary);font-size:var(--font-size-sm);text-decoration:none">← Reports</a>' +
+        '<p style="color:var(--color-danger);padding:var(--space-4)">Report not found.</p>';
+      return;
+    }
+
+    function toIso(d) {
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+    var today       = new Date();
+    var defaultFrom = toIso(new Date(today.getFullYear(), 0, 1));
+    var defaultTo   = toIso(today);
+
+    function scopeLabel() {
+      if (rep.includeAll) return 'All employees';
+      var names = rep.employeeIds.map(function(uid){
+        var u = employees.find(function(e){ return e.id === uid; });
+        return u ? u.name : uid;
+      });
+      return names.join(', ') || 'None selected';
+    }
+
+    function snapshotTableHtml() {
+      if (snapshots.length === 0) {
+        return '<p style="color:var(--color-neutral-500);font-size:var(--font-size-sm);margin-top:var(--space-2)">No snapshots yet. Generate one above.</p>';
+      }
+      var rows = snapshots.map(function(s) {
+        var genLabel  = new Date(s.generatedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+        var dateRange = s.dateFrom + ' – ' + s.dateTo;
+        return '<tr>' +
+          '<td>' + esc(genLabel) + '</td>' +
+          '<td>' + esc(s.generatedByName || '—') + '</td>' +
+          '<td style="font-variant-numeric:tabular-nums">' + esc(dateRange) + '</td>' +
+          '<td style="text-align:right">' + s.otMultiplier + '×</td>' +
+          '<td style="text-align:right;font-weight:600">' + fmtMoney(s.grandTotal) + '</td>' +
+          '<td><div class="data-table__actions">' +
+            '<a class="btn btn--secondary btn--sm" href="#/admin/report-snapshot/' + esc(s.id) + '">View</a>' +
+            '<button class="btn btn--ghost btn--sm delete-snap-btn" style="color:var(--color-danger)" data-id="' + esc(s.id) + '">Delete</button>' +
+          '</div></td>' +
+        '</tr>';
+      }).join('');
+      return '<div class="table-wrapper" style="margin-top:var(--space-3)">' +
+        '<table class="data-table">' +
+          '<thead><tr>' +
+            '<th>Generated</th><th>By</th><th>Date Range</th>' +
+            '<th style="text-align:right">OT</th><th style="text-align:right">Grand Total</th>' +
+            '<th style="text-align:right">Actions</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+      '</div>';
+    }
+
+    main.innerHTML =
+      '<a href="#/admin/reports" style="color:var(--color-primary);font-size:var(--font-size-sm);text-decoration:none">← Reports</a>' +
+      '<div style="display:grid;grid-template-columns:1fr 260px;gap:var(--space-6);margin-top:var(--space-4);align-items:start">' +
+        '<div>' +
+          '<h1 style="margin:0 0 var(--space-1)">' + esc(rep.name) + '</h1>' +
+          '<p style="margin:0 0 var(--space-6);color:var(--color-neutral-500);font-size:var(--font-size-sm)">' + esc(scopeLabel()) + '</p>' +
+          '<div class="section-card">' +
+            '<h2 style="margin-top:0">Generate &amp; Save Snapshot</h2>' +
+            '<div class="form-row" style="align-items:flex-end">' +
+              '<div class="form-group"><label for="snap-from">From</label>' +
+                '<input id="snap-from" class="input" type="date" value="' + defaultFrom + '"></div>' +
+              '<div class="form-group"><label for="snap-to">To</label>' +
+                '<input id="snap-to" class="input" type="date" value="' + defaultTo + '"></div>' +
+              '<div class="form-group"><label for="snap-mult">OT multiplier</label>' +
+                '<input id="snap-mult" class="input" type="number" min="1" max="4" step="0.25" value="' + _otMultiplier + '" style="width:5.5rem"></div>' +
+              '<div><button class="btn btn--primary" id="gen-snap-btn">Generate &amp; Save</button></div>' +
+            '</div>' +
+            '<p id="snap-error" style="color:var(--color-danger);margin-top:var(--space-2);display:none"></p>' +
+          '</div>' +
+          '<h2 style="margin-top:var(--space-6)">Past Snapshots</h2>' +
+          '<div id="snap-list">' + snapshotTableHtml() + '</div>' +
+        '</div>' +
+        '<aside>' +
+          '<div class="section-card" style="margin-top:0">' +
+            '<h3 style="margin-top:0;font-size:var(--font-size-sm);text-transform:uppercase;letter-spacing:0.05em;color:var(--color-neutral-500)">Report Details</h3>' +
+            '<dl style="font-size:var(--font-size-sm)">' +
+              '<dt style="color:var(--color-neutral-500);margin-bottom:var(--space-1)">Employees</dt>' +
+              '<dd style="margin:0">' + esc(scopeLabel()) + '</dd>' +
+            '</dl>' +
+          '</div>' +
+        '</aside>' +
+      '</div>';
+
+    function wireSnapButtons() {
+      main.querySelectorAll('.delete-snap-btn').forEach(function(btn){
+        btn.addEventListener('click', async function(){
+          if (!confirm('Delete this snapshot?')) return;
+          var snapId = btn.getAttribute('data-id');
+          var r = await deleteReportSnapshot(snapId);
+          if (r.error) { showToast(r.error.message, 'error'); return; }
+          snapshots = snapshots.filter(function(s){ return s.id !== snapId; });
+          main.querySelector('#snap-list').innerHTML = snapshotTableHtml();
+          wireSnapButtons();
+          showToast('Snapshot deleted', 'success');
+        });
+      });
+    }
+
+    main.querySelector('#gen-snap-btn').addEventListener('click', async function(){
+      var btn    = main.querySelector('#gen-snap-btn');
+      var from   = main.querySelector('#snap-from').value;
+      var to     = main.querySelector('#snap-to').value;
+      var mult   = parseFloat(main.querySelector('#snap-mult').value);
+      var errEl  = main.querySelector('#snap-error');
+      if (!from || !to || from > to) { errEl.textContent = 'Please select a valid date range.'; errEl.style.display = ''; return; }
+      if (!isFinite(mult) || mult < 1) mult = 1;
+      errEl.style.display = 'none';
+      btn.disabled = true; btn.textContent = 'Generating…';
+      var empFilter = rep.includeAll ? null : rep.employeeIds;
+      var data = await generateBillingData(empFilter, from, to, mult);
+      if (data.error) { errEl.textContent = data.error; errEl.style.display = ''; btn.disabled = false; btn.textContent = 'Generate & Save'; return; }
+      var saveRes = await saveReportSnapshot(id, from, to, mult, data);
+      if (saveRes.error) { errEl.textContent = saveRes.error.message; errEl.style.display = ''; btn.disabled = false; btn.textContent = 'Generate & Save'; return; }
+      var snapsRes2 = await getReportSnapshots(id);
+      snapshots = snapsRes2.data || [];
+      main.querySelector('#snap-list').innerHTML = snapshotTableHtml();
+      wireSnapButtons();
+      btn.disabled = false; btn.textContent = 'Generate & Save';
+      showToast('Snapshot saved', 'success');
     });
 
-    generate(); // auto-generate on load
+    wireSnapButtons();
+  }
+
+  // ─── Report Snapshot View ─────────────────────────────────────────────────
+  async function adminReportSnapshotRender(root, params) {
+    var id   = params.id;
+    var main = renderAdminShell(root, '#/admin/reports', null);
+
+    var r = await getReportSnapshot(id);
+    if (r.error || !r.data) {
+      main.innerHTML = '<a href="#/admin/reports" style="color:var(--color-primary);font-size:var(--font-size-sm);text-decoration:none">← Reports</a>' +
+        '<p style="color:var(--color-danger);padding:var(--space-4)">Snapshot not found.</p>';
+      return;
+    }
+    var snap = r.data;
+    var fmtLong = function(iso){ return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }); };
+
+    main.innerHTML =
+      '<a href="#/admin/report/' + esc(snap.reportId) + '" style="color:var(--color-primary);font-size:var(--font-size-sm);text-decoration:none">← Back to Report</a>' +
+      '<div class="section-card" style="margin-top:var(--space-4);margin-bottom:var(--space-4)">' +
+        '<p style="margin:0;font-size:var(--font-size-sm);color:var(--color-neutral-500)">Snapshot from ' + esc(fmtLong(snap.generatedAt)) + '</p>' +
+        '<p style="margin:var(--space-1) 0 0;font-size:var(--font-size-sm);color:var(--color-neutral-500)">' +
+          'Generated by ' + esc(snap.generatedByName) + ' &nbsp;·&nbsp; ' +
+          esc(snap.dateFrom) + ' – ' + esc(snap.dateTo) + ' &nbsp;·&nbsp; OT: ' + snap.otMultiplier + '×' +
+        '</p>' +
+      '</div>';
+
+    main.insertAdjacentHTML('beforeend', renderBillingHtml(snap.outputJson || {}, { showPrint: true }));
+    var printBtn = main.querySelector('.billing-print-btn');
+    if (printBtn) printBtn.addEventListener('click', function(){ window.print(); });
   }
 
   // ─── Admin Settings ───────────────────────────────────────────────────────
@@ -2786,6 +3318,9 @@
     { pattern: '#/admin/expense-categories',      role: ['admin'],             render: adminExpenseCategoriesRender   },
     { pattern: '#/admin/users',                   role: ['admin'],             render: adminUsersRender               },
     { pattern: '#/admin/billing',                 role: ['admin'],             render: adminBillingRender             },
+    { pattern: '#/admin/reports',                role: ['admin'],             render: adminReportsRender             },
+    { pattern: '#/admin/report/:id',             role: ['admin'],             render: adminReportDetailRender        },
+    { pattern: '#/admin/report-snapshot/:id',    role: ['admin'],             render: adminReportSnapshotRender      },
     { pattern: '#/admin/settings',               role: ['admin'],             render: adminSettingsRender            },
   ];
 
