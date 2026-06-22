@@ -37,7 +37,7 @@
   }
 
   function statusLabel(s) {
-    return { draft: 'Draft', submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected' }[s] ?? s;
+    return { draft: 'Draft', submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected', returned: 'Returned' }[s] ?? s;
   }
 
   const DAY_LABELS = ['SAT', 'SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI'];
@@ -46,7 +46,7 @@
   const SUPABASE_URL      = 'https://knuelttymrfepbxhvsmw.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_HUxpRSe0oe1qIWs3uA8xbA_H2g2d7gv';
 
-  const VERSION = '0.3';
+  const VERSION = '0.4';
   const OT_THRESHOLD_HOURS    = 40;
   const WEEK_START_DAY        = 6;
   // Runtime values — overwritten by loadAppSettings() on startup
@@ -263,6 +263,25 @@
   let _dbNextId = 1000;
   function dbNewId() { return 'x' + (_dbNextId++); }
 
+  let _dbAuditLog = [
+    { id: 'al1', entityType: 'timesheet', entityId: 'ts1', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-16T10:32:00Z', note: '' },
+    { id: 'al2', entityType: 'timesheet', entityId: 'ts3', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-09T09:00:00Z', note: '' },
+    { id: 'al3', entityType: 'timesheet', entityId: 'ts3', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-10T14:00:00Z', note: '' },
+    { id: 'al4', entityType: 'timesheet', entityId: 'ts4', action: 'submitted', byId: 'u2', byName: 'Bob Jones',   at: '2026-06-09T10:15:00Z', note: '' },
+    { id: 'al5', entityType: 'timesheet', entityId: 'ts4', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-10T15:00:00Z', note: '' },
+    { id: 'al6', entityType: 'expense',   entityId: 'exp1', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-16T15:00:00Z', note: '' },
+    { id: 'al7', entityType: 'expense',   entityId: 'exp2', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-10T17:00:00Z', note: '' },
+    { id: 'al8', entityType: 'expense',   entityId: 'exp2', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-11T09:00:00Z', note: '' },
+    { id: 'al9', entityType: 'expense',   entityId: 'exp3', action: 'submitted', byId: 'u2', byName: 'Bob Jones',   at: '2026-06-09T11:00:00Z', note: '' },
+    { id: 'al10',entityType: 'expense',   entityId: 'exp3', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-10T15:00:00Z', note: '' },
+  ];
+
+  function dbAppendAudit(entityType, entityId, action, byId, note) {
+    var user = MOCK_USERS.find(function(u){ return u.id === byId; });
+    _dbAuditLog.push({ id: dbNewId(), entityType: entityType, entityId: entityId, action: action,
+      byId: byId, byName: user ? user.name : 'Unknown', at: new Date().toISOString(), note: note || '' });
+  }
+
   function ok(data)  { return Promise.resolve({ data: data, error: null }); }
   function dbErr(msg){ return Promise.resolve({ data: null, error: new Error(msg) }); }
 
@@ -469,10 +488,11 @@
     if (!_supabase) {
       var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
       if (!ts) return dbErr('Timesheet not found');
-      if (ts.status !== 'draft' && ts.status !== 'rejected') return dbErr('Cannot submit in current state');
+      if (ts.status !== 'draft' && ts.status !== 'rejected' && ts.status !== 'returned') return dbErr('Cannot submit in current state');
       ts.status = 'submitted';
       ts.submittedAt = new Date().toISOString();
       ts.rejectionReason = null;
+      dbAppendAudit('timesheet', timesheetId, 'submitted', ts.userId, '');
       return ok(Object.assign({}, ts));
     }
     var r = await _supabase.from('timesheets').update({ status: 'submitted', submitted_at: new Date().toISOString(), rejection_reason: null }).eq('id', timesheetId).select().single();
@@ -488,24 +508,81 @@
       ts.approvedBy = adminUserId || null;
       ts.approvedAt = new Date().toISOString();
       ts.approvalNote = note || null;
+      dbAppendAudit('timesheet', timesheetId, 'approved', adminUserId, note || '');
       return ok(Object.assign({}, ts));
     }
     var r = await _supabase.from('timesheets').update({ status: 'approved', approved_by: adminUserId || null, approved_at: new Date().toISOString(), approval_note: note || null }).eq('id', timesheetId).select().single();
     if (r.error) return dbErr(r.error.message);
+    if (_supabase && adminUserId) await _supabase.from('audit_log').insert({ entity_type: 'timesheet', entity_id: timesheetId, action: 'approved', performed_by: adminUserId, note: note || '' });
     return ok(mapTimesheet(r.data));
   }
 
-  async function rejectTimesheet(timesheetId, reason) {
+  async function rejectTimesheet(timesheetId, reason, adminUserId) {
     if (!_supabase) {
       var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
       if (!ts) return dbErr('Timesheet not found');
       ts.status = 'rejected';
       ts.rejectionReason = reason;
+      dbAppendAudit('timesheet', timesheetId, 'rejected', adminUserId, reason);
       return ok(Object.assign({}, ts));
     }
     var r = await _supabase.from('timesheets').update({ status: 'rejected', rejection_reason: reason }).eq('id', timesheetId).select().single();
     if (r.error) return dbErr(r.error.message);
+    if (adminUserId) await _supabase.from('audit_log').insert({ entity_type: 'timesheet', entity_id: timesheetId, action: 'rejected', performed_by: adminUserId, note: reason });
     return ok(mapTimesheet(r.data));
+  }
+
+  async function returnTimesheet(timesheetId, reason, adminUserId) {
+    if (!_supabase) {
+      var ts = _dbTimesheets.find(function(t){ return t.id === timesheetId; });
+      if (!ts) return dbErr('Timesheet not found');
+      ts.status = 'returned';
+      ts.rejectionReason = reason;
+      dbAppendAudit('timesheet', timesheetId, 'returned', adminUserId, reason);
+      return ok(Object.assign({}, ts));
+    }
+    var r = await _supabase.from('timesheets').update({ status: 'returned', rejection_reason: reason }).eq('id', timesheetId).select().single();
+    if (r.error) return dbErr(r.error.message);
+    if (adminUserId) await _supabase.from('audit_log').insert({ entity_type: 'timesheet', entity_id: timesheetId, action: 'returned', performed_by: adminUserId, note: reason });
+    return ok(mapTimesheet(r.data));
+  }
+
+  async function getAllTimesheets() {
+    if (!_supabase) {
+      var list = _dbTimesheets.filter(function(t){ return t.status !== 'draft'; });
+      var result = list.map(function(ts) {
+        var user    = MOCK_USERS.find(function(u){ return u.id === ts.userId; });
+        var entries = _dbEntries.filter(function(e){ return e.timesheetId === ts.id; });
+        return { timesheet: Object.assign({}, ts), userName: user ? user.name : 'Unknown', totalHours: weeklyTotals(entries).total };
+      });
+      result.sort(function(a, b){ return (b.timesheet.submittedAt || '').localeCompare(a.timesheet.submittedAt || ''); });
+      return ok(result);
+    }
+    var r = await _supabase.from('timesheets').select('*, timesheet_entries(*)').neq('status', 'draft').order('submitted_at', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    var userIds = r.data.map(function(row){ return row.user_id; }).filter(function(id, i, arr){ return arr.indexOf(id) === i; });
+    var pr = userIds.length ? await _supabase.from('profiles').select('id, name').in('id', userIds) : { data: [], error: null };
+    if (pr.error) return dbErr(pr.error.message);
+    var profileMap = {};
+    (pr.data || []).forEach(function(p){ profileMap[p.id] = p.name; });
+    return ok(r.data.map(function(row){
+      var entries = (row.timesheet_entries || []).map(mapEntry);
+      return { timesheet: mapTimesheet(row), userName: profileMap[row.user_id] || 'Unknown', totalHours: weeklyTotals(entries).total };
+    }));
+  }
+
+  async function getAuditLog(entityType, entityId) {
+    if (!_supabase) {
+      var events = _dbAuditLog.filter(function(e){ return e.entityType === entityType && e.entityId === entityId; });
+      events.sort(function(a, b){ return a.at.localeCompare(b.at); });
+      return ok(events.map(function(e){ return Object.assign({}, e); }));
+    }
+    var r = await _supabase.from('audit_log').select('*, profiles(name)').eq('entity_type', entityType).eq('entity_id', entityId).order('performed_at', { ascending: true });
+    if (r.error) return dbErr(r.error.message);
+    return ok((r.data || []).map(function(row){
+      return { id: row.id, entityType: row.entity_type, entityId: row.entity_id, action: row.action,
+               byId: row.performed_by, byName: row.profiles ? row.profiles.name : 'Unknown', at: row.performed_at, note: row.note || '' };
+    }));
   }
 
   async function getTimesheetsByUser(userId) {
@@ -677,17 +754,57 @@
     return ok(mapExpense(r.data));
   }
 
-  async function rejectExpense(id, reason) {
+  async function rejectExpense(id, reason, adminUserId) {
     if (!_supabase) {
       var e = _dbExpenses.find(function(x){ return x.id === id; });
       if (!e) return dbErr('Expense not found');
       e.status = 'rejected';
       e.rejectionReason = reason;
+      dbAppendAudit('expense', id, 'rejected', adminUserId, reason);
       return ok(Object.assign({}, e));
     }
     var r = await _supabase.from('expenses').update({ status: 'rejected', rejection_reason: reason }).eq('id', id).select().single();
     if (r.error) return dbErr(r.error.message);
+    if (adminUserId) await _supabase.from('audit_log').insert({ entity_type: 'expense', entity_id: id, action: 'rejected', performed_by: adminUserId, note: reason });
     return ok(mapExpense(r.data));
+  }
+
+  async function returnExpense(id, reason, adminUserId) {
+    if (!_supabase) {
+      var e = _dbExpenses.find(function(x){ return x.id === id; });
+      if (!e) return dbErr('Expense not found');
+      e.status = 'returned';
+      e.rejectionReason = reason;
+      dbAppendAudit('expense', id, 'returned', adminUserId, reason);
+      return ok(Object.assign({}, e));
+    }
+    var r = await _supabase.from('expenses').update({ status: 'returned', rejection_reason: reason }).eq('id', id).select().single();
+    if (r.error) return dbErr(r.error.message);
+    if (adminUserId) await _supabase.from('audit_log').insert({ entity_type: 'expense', entity_id: id, action: 'returned', performed_by: adminUserId, note: reason });
+    return ok(mapExpense(r.data));
+  }
+
+  async function getAllExpenses() {
+    if (!_supabase) {
+      var list = _dbExpenses.filter(function(e){ return e.status !== 'draft'; });
+      var result = list.map(function(ex) {
+        var user = MOCK_USERS.find(function(u){ return u.id === ex.userId; });
+        var cat  = _dbExpenseCategories.find(function(c){ return c.id === ex.categoryId; });
+        return { expense: Object.assign({}, ex), userName: user ? user.name : 'Unknown', categoryName: cat ? cat.name : 'Uncategorized' };
+      });
+      result.sort(function(a, b){ return (b.expense.submittedAt || '').localeCompare(a.expense.submittedAt || ''); });
+      return ok(result);
+    }
+    var r = await _supabase.from('expenses').select('*, expense_categories(name)').neq('status', 'draft').order('submitted_at', { ascending: false });
+    if (r.error) return dbErr(r.error.message);
+    var userIds = r.data.map(function(row){ return row.user_id; }).filter(function(id, i, arr){ return arr.indexOf(id) === i; });
+    var pr = userIds.length ? await _supabase.from('profiles').select('id, name').in('id', userIds) : { data: [], error: null };
+    if (pr.error) return dbErr(pr.error.message);
+    var profileMap = {};
+    (pr.data || []).forEach(function(p){ profileMap[p.id] = p.name; });
+    return ok(r.data.map(function(row){
+      return { expense: mapExpense(row), userName: profileMap[row.user_id] || 'Unknown', categoryName: row.expense_categories ? row.expense_categories.name : 'Uncategorized' };
+    }));
   }
 
   async function deleteExpense(id) {
@@ -754,6 +871,7 @@
           '<ul class="admin-nav" role="list">' +
             adminNavItem('#/admin/approvals',          'Pending Approvals',  currentHash) +
             adminNavItem('#/admin/expenses',           'Pending Expenses',   currentHash) +
+            adminNavItem('#/admin/all',                'All Submissions',    currentHash) +
             adminNavItem('#/admin/charge-codes',       'Charge Codes',       currentHash) +
             adminNavItem('#/admin/expense-categories', 'Expense Categories', currentHash) +
             adminNavItem('#/admin/users',              'Users',              currentHash) +
@@ -857,7 +975,7 @@
 
   function empIsEditable() {
     var s = _empTimesheet ? _empTimesheet.status : null;
-    return !s || s === 'draft' || s === 'rejected';
+    return !s || s === 'draft' || s === 'rejected' || s === 'returned';
   }
 
   function empMakeEmptyEntry(dayOffset) {
@@ -912,7 +1030,8 @@
             '<button class="btn btn--ghost btn--sm" id="logout-btn">Sign Out</button>' +
           '</div>' +
         '</header>' +
-        (rejReason ? '<div style="background:var(--color-danger-light);border:1px solid var(--color-danger);color:var(--color-danger-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)"><strong>Rejected:</strong> ' + esc(rejReason) + '</div>' : '') +
+        (rejReason && status === 'rejected' ? '<div class="status-banner" style="background:var(--color-danger-light);border:1px solid var(--color-danger);color:var(--color-danger-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)"><strong>Rejected:</strong> ' + esc(rejReason) + '</div>' : '') +
+        (rejReason && status === 'returned' ? '<div class="status-banner" style="background:#fef3c7;border:1px solid #f59e0b;color:#92400e;border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)"><strong>Returned for revision:</strong> ' + esc(rejReason) + '</div>' : '') +
         (approvalNote ? '<div style="background:var(--color-success-light);border:1px solid var(--color-success);color:var(--color-success-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)"><strong>Note from admin:</strong> ' + esc(approvalNote) + '</div>' : '') +
         '<div class="timesheet-grid" id="timesheet-grid"></div>' +
         '<div class="totals-section" id="totals-section">' +
@@ -1165,9 +1284,156 @@
     }
     var grid = _empRoot.querySelector('#timesheet-grid');
     if (grid) grid.innerHTML = timesheetGridReadonlyHtml(_empEntries, _empChargeCodes, empIsoDate(_empWeekStart));
-    var rejBanner = _empRoot.querySelector('[style*="danger-light"]');
+    var rejBanner = _empRoot.querySelector('.status-banner');
     if (rejBanner) rejBanner.remove();
     showToast('Timesheet submitted for approval.', 'success');
+  }
+
+  // ─── Audit Timeline Helper ─────────────────────────────────────────────────
+  function auditTimelineHtml(events) {
+    if (!events || !events.length) return '';
+    var actionLabels = { submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected', returned: 'Returned for revision' };
+    var items = events.map(function(e) {
+      return '<li class="audit-timeline__event audit-timeline__event--' + esc(e.action) + '">' +
+        '<span class="audit-timeline__label">' + esc(actionLabels[e.action] || e.action) + '</span>' +
+        '<span class="audit-timeline__by"> by ' + esc(e.byName) + '</span>' +
+        '<span class="audit-timeline__at"> · ' + formatDateTime(e.at) + '</span>' +
+        (e.note ? '<span class="audit-timeline__note">' + esc(e.note) + '</span>' : '') +
+      '</li>';
+    }).join('');
+    return '<div class="section-card"><h2>History</h2><ol class="audit-timeline" aria-label="Audit trail">' + items + '</ol></div>';
+  }
+
+  // ─── Admin All Submissions ─────────────────────────────────────────────────
+  async function adminAllSubmissionsRender(root) {
+    var main = renderAdminShell(root, '#/admin/all', 'All Submissions');
+
+    var results = await Promise.all([getAllTimesheets(), getAllExpenses()]);
+    if (results[0].error || results[1].error) {
+      main.insertAdjacentHTML('beforeend', '<p style="color:var(--color-danger)">Failed to load submissions.</p>');
+      return;
+    }
+
+    var allItems = [];
+    (results[0].data || []).forEach(function(item) {
+      var ts = item.timesheet;
+      allItems.push({ id: ts.id, type: 'timesheet', employee: item.userName, period: ts.weekStart, amount: item.totalHours, status: ts.status, submittedAt: ts.submittedAt });
+    });
+    (results[1].data || []).forEach(function(item) {
+      var ex = item.expense;
+      allItems.push({ id: ex.id, type: 'expense', employee: item.userName, period: ex.date, amount: ex.amount, status: ex.status, submittedAt: ex.submittedAt });
+    });
+    allItems.sort(function(a, b){ return (b.submittedAt || '').localeCompare(a.submittedAt || ''); });
+
+    var currentYear = new Date().getFullYear();
+    var yearsInData = allItems.map(function(i){ return new Date(i.period + 'T00:00:00').getFullYear(); });
+    var yearSet = [currentYear];
+    yearsInData.forEach(function(y){ if (yearSet.indexOf(y) === -1) yearSet.push(y); });
+    yearSet.sort(function(a, b){ return b - a; });
+    var yearOpts = yearSet.map(function(y){ return '<option value="' + y + '"' + (y === currentYear ? ' selected' : '') + '>' + y + '</option>'; }).join('') + '<option value="custom">Custom</option>';
+
+    var todayIso = empIsoDate(new Date());
+    var yearStartIso = currentYear + '-01-01';
+
+    main.insertAdjacentHTML('beforeend',
+      '<div class="section-card" style="padding:var(--space-4);margin-bottom:var(--space-4)">' +
+        '<div style="display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:flex-end">' +
+          '<div class="form-group" style="min-width:130px;margin:0"><label style="font-size:var(--font-size-xs);color:var(--color-neutral-500);text-transform:uppercase;letter-spacing:.05em;font-weight:500">Status</label>' +
+            '<select id="f-status" class="input input--select"><option value="">All</option><option value="submitted">Submitted</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="returned">Returned</option></select></div>' +
+          '<div class="form-group" style="min-width:130px;margin:0"><label style="font-size:var(--font-size-xs);color:var(--color-neutral-500);text-transform:uppercase;letter-spacing:.05em;font-weight:500">Type</label>' +
+            '<select id="f-type" class="input input--select"><option value="">All</option><option value="timesheet">Timesheet</option><option value="expense">Expense</option></select></div>' +
+          '<div class="form-group" style="flex:1;min-width:160px;margin:0"><label style="font-size:var(--font-size-xs);color:var(--color-neutral-500);text-transform:uppercase;letter-spacing:.05em;font-weight:500">Employee</label>' +
+            '<input id="f-emp" class="input" type="search" placeholder="Search by name…"></div>' +
+          '<div class="form-group" style="min-width:110px;margin:0"><label style="font-size:var(--font-size-xs);color:var(--color-neutral-500);text-transform:uppercase;letter-spacing:.05em;font-weight:500">Year</label>' +
+            '<select id="f-year" class="input input--select">' + yearOpts + '</select></div>' +
+          '<div class="form-group" style="min-width:130px;margin:0"><label style="font-size:var(--font-size-xs);color:var(--color-neutral-500);text-transform:uppercase;letter-spacing:.05em;font-weight:500">From</label>' +
+            '<input id="f-from" class="input" type="date" value="' + yearStartIso + '"></div>' +
+          '<div class="form-group" style="min-width:130px;margin:0"><label style="font-size:var(--font-size-xs);color:var(--color-neutral-500);text-transform:uppercase;letter-spacing:.05em;font-weight:500">To</label>' +
+            '<input id="f-to" class="input" type="date" value="' + todayIso + '"></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="table-wrapper">' +
+        '<table class="data-table" aria-label="All submissions">' +
+          '<thead><tr>' +
+            '<th scope="col">Employee</th><th scope="col">Type</th><th scope="col">Period</th>' +
+            '<th scope="col" style="text-align:right">Hrs / Amount</th><th scope="col">Status</th>' +
+            '<th scope="col">Submitted</th><th scope="col"><span class="sr-only">Actions</span></th>' +
+          '</tr></thead>' +
+          '<tbody id="all-tbody"></tbody>' +
+        '</table>' +
+        '<div id="all-empty" class="empty-state" style="display:none"><p>No submissions match your filters.</p></div>' +
+      '</div>');
+
+    function renderAllRows(items) {
+      var tbody = main.querySelector('#all-tbody');
+      var empty = main.querySelector('#all-empty');
+      if (!tbody) return;
+      if (!items.length) { tbody.innerHTML = ''; empty.style.display = ''; return; }
+      empty.style.display = 'none';
+      tbody.innerHTML = items.map(function(item) {
+        var periodLabel = item.type === 'timesheet' ? formatWeekShort(item.period) : formatDate(item.period);
+        var amountLabel = item.type === 'timesheet' ? fmtHours(item.amount) + ' h' : '$' + Number(item.amount).toFixed(2);
+        var typeBadge   = item.type === 'timesheet'
+          ? '<span class="badge" style="background:#e0e7ff;color:#3730a3">Timesheet</span>'
+          : '<span class="badge" style="background:#d1fae5;color:#065f46">Expense</span>';
+        return '<tr>' +
+          '<td data-label="Employee">' + esc(item.employee) + '</td>' +
+          '<td data-label="Type">' + typeBadge + '</td>' +
+          '<td data-label="Period">' + esc(periodLabel) + '</td>' +
+          '<td data-label="Hrs / Amount" style="text-align:right;font-variant-numeric:tabular-nums">' + esc(amountLabel) + '</td>' +
+          '<td data-label="Status"><span class="badge badge--' + esc(item.status) + '">' + statusLabel(item.status) + '</span></td>' +
+          '<td data-label="Submitted">' + (item.submittedAt ? formatDateTime(item.submittedAt) : '—') + '</td>' +
+          '<td data-label=" "><div class="data-table__actions">' +
+            '<button class="btn btn--primary btn--sm review-btn" data-id="' + esc(item.id) + '" data-type="' + esc(item.type) + '">Review</button>' +
+          '</div></td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function formatDate(iso) {
+      return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function applyFilters() {
+      var status = main.querySelector('#f-status').value;
+      var type   = main.querySelector('#f-type').value;
+      var emp    = main.querySelector('#f-emp').value.trim().toLowerCase();
+      var from   = main.querySelector('#f-from').value;
+      var to     = main.querySelector('#f-to').value;
+      var filtered = allItems.filter(function(item) {
+        if (status && item.status !== status) return false;
+        if (type   && item.type   !== type)   return false;
+        if (emp    && item.employee.toLowerCase().indexOf(emp) === -1) return false;
+        if (from   && item.period < from)     return false;
+        if (to     && item.period > to)       return false;
+        return true;
+      });
+      renderAllRows(filtered);
+    }
+
+    var yearEl = main.querySelector('#f-year');
+    var fromEl = main.querySelector('#f-from');
+    var toEl   = main.querySelector('#f-to');
+    yearEl.addEventListener('change', function() {
+      var y = yearEl.value;
+      if (y === 'custom') return;
+      fromEl.value = y + '-01-01';
+      toEl.value   = (y === String(currentYear)) ? todayIso : y + '-12-31';
+      applyFilters();
+    });
+    fromEl.addEventListener('change', function(){ yearEl.value = 'custom'; applyFilters(); });
+    toEl.addEventListener('change',   function(){ yearEl.value = 'custom'; applyFilters(); });
+    main.querySelector('#f-status').addEventListener('change', applyFilters);
+    main.querySelector('#f-type').addEventListener('change', applyFilters);
+    main.querySelector('#f-emp').addEventListener('input', applyFilters);
+
+    main.querySelector('#all-tbody').addEventListener('click', function(e) {
+      var btn = e.target.closest('.review-btn');
+      if (!btn) return;
+      navigate(btn.dataset.type === 'expense' ? '#/admin/expense-review/' + btn.dataset.id : '#/admin/review/' + btn.dataset.id);
+    });
+
+    applyFilters();
   }
 
   // ─── Admin Approvals ───────────────────────────────────────────────────────
@@ -1210,12 +1476,16 @@
   async function adminReviewRender(root, params) {
     var id   = params.id;
     var main = renderAdminShell(root, '#/admin/review/' + id, '');
+    await adminReviewLoad(main, id);
+  }
 
-    var results = await Promise.all([getTimesheetById(id), getChargeCodes()]);
-    var tsResult = results[0], ccResult = results[1];
+  async function adminReviewLoad(main, id) {
+    main.innerHTML = '<div class="loading-spinner" aria-label="Loading…"></div>';
+    var results = await Promise.all([getTimesheetById(id), getChargeCodes(), getAuditLog('timesheet', id)]);
+    var tsResult = results[0], ccResult = results[1], auditResult = results[2];
 
     if (tsResult.error || !tsResult.data) {
-      main.innerHTML = '<a class="back-link" href="#/admin/approvals">← Back to Approvals</a><p style="color:var(--color-danger)">Timesheet not found.</p>';
+      main.innerHTML = '<a class="back-link" href="#/admin/all">← Back</a><p style="color:var(--color-danger)">Timesheet not found.</p>';
       return;
     }
     var ts          = tsResult.data.timesheet;
@@ -1223,7 +1493,11 @@
     var entries     = tsResult.data.entries;
     var totals      = tsResult.data.totals;
     var chargeCodes = ccResult.data || [];
+    var auditEvents = auditResult.data || [];
     var rollup      = remarksRollup(entries);
+    var adminId     = currentUser() ? currentUser().id : null;
+    var canDecide   = ts.status === 'submitted';
+    var canSendBack = ts.status === 'approved' || ts.status === 'returned';
 
     var byCodeRows = Object.keys(totals.byCode).filter(function(ccId){ return totals.byCode[ccId] > 0; }).map(function(ccId) {
       var cc = chargeCodes.find(function(c){ return c.id === ccId; });
@@ -1231,12 +1505,12 @@
     }).join('');
 
     main.innerHTML =
-      '<a class="back-link" href="#/admin/approvals">← Back to Approvals</a>' +
+      '<a class="back-link" href="#/admin/all">← Back to All Submissions</a>' +
       '<div style="display:flex;align-items:center;gap:var(--space-4);margin-bottom:var(--space-6);flex-wrap:wrap">' +
         '<h1 style="margin:0">' + esc(user ? user.name : 'Employee') + ' — ' + esc(formatWeekShort(ts.weekStart)) + '</h1>' +
         '<span class="badge badge--' + ts.status + '">' + statusLabel(ts.status) + '</span>' +
       '</div>' +
-      '<div style="display:grid;grid-template-columns:1fr 280px;gap:var(--space-6);align-items:start" id="review-grid">' +
+      '<div style="display:grid;grid-template-columns:1fr 300px;gap:var(--space-6);align-items:start" id="review-grid">' +
         '<div>' +
           '<h2 style="font-size:var(--font-size-lg);margin-bottom:var(--space-4)">Time Entries</h2>' +
           timesheetGridReadonlyHtml(entries, chargeCodes, ts.weekStart) +
@@ -1254,7 +1528,7 @@
             '</table>' +
             (rollup ? '<div style="margin-top:var(--space-4)"><p style="font-size:var(--font-size-sm);font-weight:600;color:var(--color-neutral-600);margin-bottom:var(--space-2)">Remarks</p><div class="remarks-rollup">' + esc(rollup) + '</div></div>' : '') +
           '</div>' +
-          (ts.status === 'submitted' ?
+          (canDecide ?
             '<div class="section-card"><h2>Decision</h2>' +
               '<div style="display:flex;flex-direction:column;gap:var(--space-4)">' +
                 '<div>' +
@@ -1269,54 +1543,57 @@
                 '</div>' +
               '</div>' +
             '</div>' : '') +
+          (canSendBack ?
+            '<div class="section-card">' +
+              '<h2>Send Back for Revision</h2>' +
+              '<p style="font-size:var(--font-size-sm);color:var(--color-neutral-500);margin-bottom:var(--space-3)">Returns this timesheet to the employee for editing and resubmission.</p>' +
+              '<label for="return-reason" style="font-size:var(--font-size-sm);color:var(--color-neutral-600);display:block;margin-bottom:var(--space-1)">Reason <span style="color:var(--color-danger)">*</span></label>' +
+              '<textarea id="return-reason" class="input input--textarea" rows="2" placeholder="Required — employee will see this message"></textarea>' +
+              '<button class="btn btn--block" id="sendback-btn" style="margin-top:var(--space-2);background:#f59e0b;color:white;border-color:#f59e0b">↶ Send Back</button>' +
+            '</div>' : '') +
+          auditTimelineHtml(auditEvents) +
         '</aside>' +
       '</div>';
 
-    if (ts.status !== 'submitted') return;
-    var adminId = currentUser() ? currentUser().id : null;
+    if (canDecide) {
+      main.querySelector('#approve-btn').addEventListener('click', async function () {
+        var note = main.querySelector('#approve-note').value.trim();
+        var btn = main.querySelector('#approve-btn');
+        btn.disabled = true; btn.textContent = 'Approving…';
+        var res = await approveTimesheet(id, adminId, note);
+        if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✓ Approve'; return; }
+        showToast('Timesheet approved.', 'success');
+        navigate('#/admin/approvals');
+      });
 
-    function tsDecisionDone(label, empEmail, empName, subject, body) {
-      var aside = main.querySelector('aside');
-      if (!aside) { navigate('#/admin/approvals'); return; }
-      var emailBtn = (empEmail)
-        ? '<a href="' + esc(mailtoLink(empEmail, subject, body)) + '" class="btn btn--secondary btn--block" style="margin-top:var(--space-3)">✉ Email ' + esc(empName) + '</a>'
-        : '';
-      aside.innerHTML =
-        '<div class="section-card" style="margin-top:0">' +
-          '<p style="font-weight:600;margin-bottom:var(--space-3)">' + label + '</p>' +
-          emailBtn +
-          '<a href="#/admin/approvals" class="btn btn--ghost btn--block" style="margin-top:var(--space-2)">← Back to list</a>' +
-        '</div>';
+      main.querySelector('#reject-btn').addEventListener('click', async function () {
+        var reason   = main.querySelector('#reject-reason').value.trim();
+        var textarea = main.querySelector('#reject-reason');
+        if (!reason) { textarea.setAttribute('aria-invalid', 'true'); textarea.focus(); showToast('Please enter a rejection reason.', 'error'); return; }
+        textarea.removeAttribute('aria-invalid');
+        var btn = main.querySelector('#reject-btn');
+        btn.disabled = true; btn.textContent = 'Rejecting…';
+        var res = await rejectTimesheet(id, reason, adminId);
+        if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✕ Reject'; return; }
+        showToast('Timesheet rejected.', 'info');
+        navigate('#/admin/approvals');
+      });
     }
 
-    main.querySelector('#approve-btn').addEventListener('click', async function () {
-      var note = main.querySelector('#approve-note').value.trim();
-      var btn = main.querySelector('#approve-btn');
-      btn.disabled = true; btn.textContent = 'Approving…';
-      var res = await approveTimesheet(id, adminId, note);
-      if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✓ Approve'; return; }
-      showToast('Timesheet approved.', 'success');
-      tsDecisionDone('✓ Approved',
-        user ? user.email : '', user ? user.name : 'employee',
-        'Timesheet approved — ' + formatWeekShort(ts.weekStart),
-        'Hi ' + (user ? user.name : '') + ',\n\nYour timesheet for ' + formatWeekShort(ts.weekStart) + ' has been approved.' + (note ? '\n\nNote from admin: ' + note : '') + '\n\nThanks!');
-    });
-
-    main.querySelector('#reject-btn').addEventListener('click', async function () {
-      var reason   = main.querySelector('#reject-reason').value.trim();
-      var textarea = main.querySelector('#reject-reason');
-      if (!reason) { textarea.setAttribute('aria-invalid', 'true'); textarea.focus(); showToast('Please enter a rejection reason.', 'error'); return; }
-      textarea.removeAttribute('aria-invalid');
-      var btn = main.querySelector('#reject-btn');
-      btn.disabled = true; btn.textContent = 'Rejecting…';
-      var res = await rejectTimesheet(id, reason);
-      if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '✕ Reject'; return; }
-      showToast('Timesheet rejected.', 'info');
-      tsDecisionDone('✕ Returned for changes',
-        user ? user.email : '', user ? user.name : 'employee',
-        'Timesheet returned — ' + formatWeekShort(ts.weekStart),
-        'Hi ' + (user ? user.name : '') + ',\n\nYour timesheet for ' + formatWeekShort(ts.weekStart) + ' needs changes.\n\nReason: ' + reason + '\n\nPlease update and resubmit. Thanks!');
-    });
+    if (canSendBack) {
+      main.querySelector('#sendback-btn').addEventListener('click', async function () {
+        var reason   = main.querySelector('#return-reason').value.trim();
+        var textarea = main.querySelector('#return-reason');
+        if (!reason) { textarea.setAttribute('aria-invalid', 'true'); textarea.focus(); showToast('Please enter a reason before sending back.', 'error'); return; }
+        textarea.removeAttribute('aria-invalid');
+        var btn = main.querySelector('#sendback-btn');
+        btn.disabled = true; btn.textContent = 'Sending back…';
+        var res = await returnTimesheet(id, reason, adminId);
+        if (res.error) { showToast(res.error.message, 'error'); btn.disabled = false; btn.textContent = '↶ Send Back'; return; }
+        showToast('Timesheet returned to employee for revision.', 'info');
+        await adminReviewLoad(main, id);
+      });
+    }
   }
 
   // ─── Admin Charge Codes ────────────────────────────────────────────────────
@@ -2003,15 +2280,25 @@
   async function adminExpenseReviewRender(root, params) {
     var id   = params.id;
     var main = renderAdminShell(root, '#/admin/expense-review/' + id, '');
-    var res  = await getExpenseById(id);
+    await adminExpenseReviewLoad(main, id);
+  }
+
+  async function adminExpenseReviewLoad(main, id) {
+    main.innerHTML = '<div class="loading-spinner" aria-label="Loading…"></div>';
+    var results = await Promise.all([getExpenseById(id), getAuditLog('expense', id)]);
+    var res = results[0], auditResult = results[1];
     if (res.error || !res.data) {
-      main.innerHTML = '<a class="back-link" href="#/admin/expenses">&#8592; Back to Pending Expenses</a><p style="color:var(--color-danger)">Expense not found.</p>';
+      main.innerHTML = '<a class="back-link" href="#/admin/all">&#8592; Back</a><p style="color:var(--color-danger)">Expense not found.</p>';
       return;
     }
     var exp = res.data;
+    var auditEvents = auditResult.data || [];
+    var adminId  = currentUser() ? currentUser().id : null;
+    var canDecide   = exp.status === 'submitted';
+    var canSendBack = exp.status === 'approved' || exp.status === 'returned';
 
     main.innerHTML =
-      '<a class="back-link" href="#/admin/expenses">&#8592; Back to Pending Expenses</a>' +
+      '<a class="back-link" href="#/admin/all">&#8592; Back to All Submissions</a>' +
       '<div style="display:flex;align-items:center;gap:var(--space-4);margin-bottom:var(--space-6);flex-wrap:wrap">' +
         '<h1 style="margin:0">' + esc(exp.user ? exp.user.name : 'Employee') + ' — Expense</h1>' +
         '<span class="badge badge--' + exp.status + '">' + statusLabel(exp.status) + '</span>' +
@@ -2026,68 +2313,73 @@
             '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Receipt ref.</th><td>' +
               (exp.receiptRef ? esc(exp.receiptRef) : '<span style="color:var(--color-neutral-400)">None provided</span>') + '</td></tr>' +
             (exp.submittedAt ? '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Submitted</th><td>' + formatDateTime(exp.submittedAt) + '</td></tr>' : '') +
+            (exp.rejectionReason ? '<tr><th scope="row" style="font-weight:500;color:var(--color-neutral-600)">Last reason</th><td style="color:var(--color-neutral-600);font-style:italic">' + esc(exp.rejectionReason) + '</td></tr>' : '') +
           '</tbody></table>' +
         '</div>' +
         '<aside>' +
-          (exp.status === 'submitted'
+          (canDecide
             ? '<div class="section-card" style="margin-top:0"><h2>Decision</h2>' +
                 '<div style="display:flex;flex-direction:column;gap:var(--space-4)">' +
                   '<button class="btn btn--success btn--block" id="exp-approve-btn">&#10003; Approve</button>' +
                   '<div>' +
-                    '<label for="exp-reject-reason" style="display:block;margin-bottom:var(--space-2)">Rejection reason <span style="color:var(--color-danger)">*</span></label>' +
-                    '<textarea id="exp-reject-reason" class="input input--textarea" rows="3" placeholder="Required — employee will see this"></textarea>' +
+                    '<label for="exp-reject-reason" style="font-size:var(--font-size-sm);color:var(--color-neutral-600);display:block;margin-bottom:var(--space-1)">Rejection reason <span style="color:var(--color-danger)">*</span></label>' +
+                    '<textarea id="exp-reject-reason" class="input input--textarea" rows="2" placeholder="Required — employee will see this"></textarea>' +
                     '<button class="btn btn--danger btn--block" id="exp-reject-btn" style="margin-top:var(--space-2)">&#10005; Reject</button>' +
                   '</div>' +
                 '</div>' +
               '</div>'
             : '') +
+          (canSendBack
+            ? '<div class="section-card" ' + (canDecide ? '' : 'style="margin-top:0"') + '>' +
+                '<h2>Send Back for Revision</h2>' +
+                '<p style="font-size:var(--font-size-sm);color:var(--color-neutral-500);margin-bottom:var(--space-3)">Returns this expense to the employee for editing and resubmission.</p>' +
+                '<label for="exp-return-reason" style="font-size:var(--font-size-sm);color:var(--color-neutral-600);display:block;margin-bottom:var(--space-1)">Reason <span style="color:var(--color-danger)">*</span></label>' +
+                '<textarea id="exp-return-reason" class="input input--textarea" rows="2" placeholder="Required — employee will see this"></textarea>' +
+                '<button class="btn btn--block" id="exp-sendback-btn" style="margin-top:var(--space-2);background:#f59e0b;color:white;border-color:#f59e0b">&#8626; Send Back</button>' +
+              '</div>'
+            : '') +
+          auditTimelineHtml(auditEvents) +
         '</aside>' +
       '</div>';
 
-    if (exp.status !== 'submitted') return;
-    var adminId = currentUser() ? currentUser().id : null;
+    if (canDecide) {
+      main.querySelector('#exp-approve-btn').addEventListener('click', async function() {
+        var btn = main.querySelector('#exp-approve-btn');
+        btn.disabled = true; btn.textContent = 'Approving…';
+        var r = await approveExpense(id, adminId);
+        if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '✓ Approve'; return; }
+        showToast('Expense approved.', 'success');
+        navigate('#/admin/all');
+      });
 
-    function expDecisionDone(label, empEmail, empName, subject, body) {
-      var aside = main.querySelector('aside');
-      if (!aside) { navigate('#/admin/expenses'); return; }
-      var emailBtn = (empEmail)
-        ? '<a href="' + esc(mailtoLink(empEmail, subject, body)) + '" class="btn btn--secondary btn--block" style="margin-top:var(--space-3)">✉ Email ' + esc(empName) + '</a>'
-        : '';
-      aside.innerHTML =
-        '<div class="section-card" style="margin-top:0">' +
-          '<p style="font-weight:600;margin-bottom:var(--space-3)">' + label + '</p>' +
-          emailBtn +
-          '<a href="#/admin/expenses" class="btn btn--ghost btn--block" style="margin-top:var(--space-2)">← Back to list</a>' +
-        '</div>';
+      main.querySelector('#exp-reject-btn').addEventListener('click', async function() {
+        var reason   = main.querySelector('#exp-reject-reason').value.trim();
+        var textarea = main.querySelector('#exp-reject-reason');
+        if (!reason) { textarea.setAttribute('aria-invalid', 'true'); textarea.focus(); showToast('Please enter a rejection reason.', 'error'); return; }
+        textarea.removeAttribute('aria-invalid');
+        var btn = main.querySelector('#exp-reject-btn');
+        btn.disabled = true; btn.textContent = 'Rejecting…';
+        var r = await rejectExpense(id, reason, adminId);
+        if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '✕ Reject'; return; }
+        showToast('Expense rejected.', 'info');
+        navigate('#/admin/all');
+      });
     }
 
-    main.querySelector('#exp-approve-btn').addEventListener('click', async function() {
-      var btn = main.querySelector('#exp-approve-btn');
-      btn.disabled = true; btn.textContent = 'Approving…';
-      var r = await approveExpense(id, adminId);
-      if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '&#10003; Approve'; return; }
-      showToast('Expense approved.', 'success');
-      expDecisionDone('✓ Approved',
-        exp.user ? exp.user.email : '', exp.user ? exp.user.name : 'employee',
-        'Expense approved — ' + exp.date,
-        'Hi ' + (exp.user ? exp.user.name : '') + ',\n\nYour expense of $' + (exp.amount || 0).toFixed(2) + ' on ' + exp.date + ' has been approved.\n\nThanks!');
-    });
-
-    main.querySelector('#exp-reject-btn').addEventListener('click', async function() {
-      var reason   = main.querySelector('#exp-reject-reason').value.trim();
-      var textarea = main.querySelector('#exp-reject-reason');
-      if (!reason) { textarea.setAttribute('aria-invalid', 'true'); textarea.focus(); showToast('Please enter a rejection reason.', 'error'); return; }
-      textarea.removeAttribute('aria-invalid');
-      var btn = main.querySelector('#exp-reject-btn');
-      btn.disabled = true; btn.textContent = 'Rejecting…';
-      var r = await rejectExpense(id, reason);
-      if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '&#10005; Reject'; return; }
-      showToast('Expense rejected.', 'info');
-      expDecisionDone('✕ Returned',
-        exp.user ? exp.user.email : '', exp.user ? exp.user.name : 'employee',
-        'Expense returned — ' + exp.date,
-        'Hi ' + (exp.user ? exp.user.name : '') + ',\n\nYour expense of $' + (exp.amount || 0).toFixed(2) + ' on ' + exp.date + ' was not approved.\n\nReason: ' + reason + '\n\nPlease update and resubmit. Thanks!');
-    });
+    if (canSendBack) {
+      main.querySelector('#exp-sendback-btn').addEventListener('click', async function() {
+        var reason   = main.querySelector('#exp-return-reason').value.trim();
+        var textarea = main.querySelector('#exp-return-reason');
+        if (!reason) { textarea.setAttribute('aria-invalid', 'true'); textarea.focus(); showToast('Please enter a reason before sending back.', 'error'); return; }
+        textarea.removeAttribute('aria-invalid');
+        var btn = main.querySelector('#exp-sendback-btn');
+        btn.disabled = true; btn.textContent = 'Sending back…';
+        var r = await returnExpense(id, reason, adminId);
+        if (r.error) { showToast(r.error.message, 'error'); btn.disabled = false; btn.textContent = '↶ Send Back'; return; }
+        showToast('Expense returned to employee for revision.', 'info');
+        await adminExpenseReviewLoad(main, id);
+      });
+    }
   }
 
   // ─── Admin Expense Categories ─────────────────────────────────────────────
@@ -2486,6 +2778,7 @@
     { pattern: '#/employee/expenses',             role: ['employee', 'admin'], render: employeeExpensesRender         },
     { pattern: '#/employee/summary',              role: ['employee', 'admin'], render: employeeSummaryRender          },
     { pattern: '#/admin/approvals',               role: ['admin'],             render: adminApprovalsRender           },
+    { pattern: '#/admin/all',                     role: ['admin'],             render: adminAllSubmissionsRender      },
     { pattern: '#/admin/review/:id',              role: ['admin'],             render: adminReviewRender              },
     { pattern: '#/admin/expenses',                role: ['admin'],             render: adminExpenseApprovalsRender    },
     { pattern: '#/admin/expense-review/:id',      role: ['admin'],             render: adminExpenseReviewRender       },
