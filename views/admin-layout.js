@@ -22,6 +22,7 @@ export function renderAdminShell(root, currentHash, title = '') {
         </div>
         <ul class="admin-nav" role="list">
           ${navItem('#/admin/approvals',    'Pending Approvals', currentHash)}
+          ${navItem('#/admin/all',          'All Submissions',   currentHash)}
           ${navItem('#/admin/charge-codes', 'Charge Codes',      currentHash)}
           ${navItem('#/admin/users',        'Users',             currentHash)}
         </ul>

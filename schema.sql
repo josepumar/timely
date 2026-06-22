@@ -47,7 +47,7 @@ create table if not exists timesheets (
   user_id          uuid references profiles(id) on delete cascade not null,
   week_start       date not null,
   status           text not null default 'draft'
-                   check (status in ('draft','submitted','approved','rejected')),
+                   check (status in ('draft','submitted','approved','rejected','returned')),
   submitted_at     timestamptz,
   approved_by      uuid references profiles(id),
   approved_at      timestamptz,
@@ -75,12 +75,28 @@ create table if not exists expenses (
   description      text not null,
   receipt_ref      text not null default '',
   status           text not null default 'draft'
-                   check (status in ('draft','submitted','approved','rejected')),
+                   check (status in ('draft','submitted','approved','rejected','returned')),
   submitted_at     timestamptz,
   approved_by      uuid references profiles(id),
   approved_at      timestamptz,
   rejection_reason text
 );
+
+create table if not exists audit_log (
+  id           uuid default uuid_generate_v4() primary key,
+  entity_type  text not null check (entity_type in ('timesheet','expense')),
+  entity_id    uuid not null,
+  action       text not null,
+  performed_by uuid references profiles(id),
+  performed_at timestamptz default now(),
+  note         text not null default ''
+);
+
+alter table audit_log enable row level security;
+drop policy if exists "admin read audit" on audit_log;
+drop policy if exists "admin insert audit" on audit_log;
+create policy "admin read audit"   on audit_log for select using (is_admin());
+create policy "admin insert audit" on audit_log for insert with check (is_admin());
 
 -- ─── Trigger: auto-create profile on sign-up ──────────────────────────────────
 
@@ -155,7 +171,7 @@ create policy "own timesheets"   on timesheets for select using (user_id = auth.
 create policy "admin view all"   on timesheets for select using (is_admin());
 create policy "insert own"       on timesheets for insert with check (user_id = auth.uid());
 create policy "update own draft" on timesheets for update
-  using  (user_id = auth.uid() and status in ('draft','rejected'))
+  using  (user_id = auth.uid() and status in ('draft','rejected','returned'))
   with check (user_id = auth.uid());
 create policy "admin update any" on timesheets for update using (is_admin());
 

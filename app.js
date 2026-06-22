@@ -7,22 +7,26 @@ import { currentUser, logout } from './auth.js';
 // ─── Lazy view imports ────────────────────────────────────────────────────────
 // Each view module is imported only once (ES module cache handles dedup).
 const views = {
-  login:           () => import('./views/login.js'),
-  employee:        () => import('./views/employee.js'),
-  adminApprovals:  () => import('./views/admin-approvals.js'),
-  adminReview:     () => import('./views/admin-review.js'),
-  adminChargeCodes:() => import('./views/admin-charge-codes.js'),
-  adminUsers:      () => import('./views/admin-users.js'),
+  login:              () => import('./views/login.js'),
+  employee:           () => import('./views/employee.js'),
+  adminApprovals:     () => import('./views/admin-approvals.js'),
+  adminAllSubmissions:() => import('./views/admin-all-submissions.js'),
+  adminReview:        () => import('./views/admin-review.js'),
+  adminExpenseReview: () => import('./views/admin-expense-review.js'),
+  adminChargeCodes:   () => import('./views/admin-charge-codes.js'),
+  adminUsers:         () => import('./views/admin-users.js'),
 };
 
 // ─── Route Table ─────────────────────────────────────────────────────────────
 const routes = [
-  { pattern: '#/login',                   role: null,                  view: views.login },
-  { pattern: '#/employee',                role: ['employee', 'admin'], view: views.employee },
-  { pattern: '#/admin/approvals',         role: ['admin'],             view: views.adminApprovals },
-  { pattern: '#/admin/review/:id',        role: ['admin'],             view: views.adminReview },
-  { pattern: '#/admin/charge-codes',      role: ['admin'],             view: views.adminChargeCodes },
-  { pattern: '#/admin/users',             role: ['admin'],             view: views.adminUsers },
+  { pattern: '#/login',                      role: null,                  view: views.login },
+  { pattern: '#/employee',                   role: ['employee', 'admin'], view: views.employee },
+  { pattern: '#/admin/approvals',            role: ['admin'],             view: views.adminApprovals },
+  { pattern: '#/admin/all',                  role: ['admin'],             view: views.adminAllSubmissions },
+  { pattern: '#/admin/review/:id',           role: ['admin'],             view: views.adminReview },
+  { pattern: '#/admin/expense-review/:id',   role: ['admin'],             view: views.adminExpenseReview },
+  { pattern: '#/admin/charge-codes',         role: ['admin'],             view: views.adminChargeCodes },
+  { pattern: '#/admin/users',               role: ['admin'],             view: views.adminUsers },
 ];
 
 // ─── Pattern Matching ─────────────────────────────────────────────────────────

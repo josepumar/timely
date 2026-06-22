@@ -49,7 +49,7 @@ function makeEmptyEntry(dayOffset) {
 // ─── Status helpers ───────────────────────────────────────────────────────────
 function isEditable() {
   const s = _timesheet?.status;
-  return !s || s === 'draft' || s === 'rejected';
+  return !s || s === 'draft' || s === 'rejected' || s === 'returned';
 }
 
 // ─── Main render ─────────────────────────────────────────────────────────────
@@ -98,8 +98,11 @@ function renderShell() {
         </div>
       </header>
 
-      ${rejReason ? `<div style="background:var(--color-danger-light);border:1px solid var(--color-danger);color:var(--color-danger-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)">
+      ${rejReason && status === 'rejected' ? `<div class="status-banner" style="background:var(--color-danger-light);border:1px solid var(--color-danger);color:var(--color-danger-text);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)">
         <strong>Rejected:</strong> ${esc(rejReason)}
+      </div>` : ''}
+      ${rejReason && status === 'returned' ? `<div class="status-banner" style="background:#fef3c7;border:1px solid #f59e0b;color:#92400e;border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--font-size-sm)">
+        <strong>Returned for revision:</strong> ${esc(rejReason)}
       </div>` : ''}
 
       <div class="timesheet-grid" id="timesheet-grid"></div>
@@ -141,7 +144,7 @@ function renderShell() {
 }
 
 function statusLabel(s) {
-  return { draft: 'Draft', submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected' }[s] ?? s;
+  return { draft: 'Draft', submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected', returned: 'Returned' }[s] ?? s;
 }
 
 // ─── Action Bar ───────────────────────────────────────────────────────────────
@@ -155,6 +158,7 @@ function renderActionBar() {
     <button class="btn btn--secondary" id="save-btn" ${_isDirty ? '' : 'disabled'}>Save Draft</button>
     <button class="btn btn--primary" id="submit-btn"
       ${(_timesheet?.status === 'submitted' || _timesheet?.status === 'approved') ? 'disabled' : ''}>
+
       Submit for Approval
     </button>
   `;
@@ -419,9 +423,8 @@ async function handleSubmit() {
   const grid = _root.querySelector('#timesheet-grid');
   if (grid) grid.innerHTML = timesheetGridReadonlyHtml(_entries, _chargeCodes, isoDate(_weekStart));
 
-  // Remove rejection banner if present
-  const rejBanner = _root.querySelector('[style*="danger-light"]');
-  if (rejBanner) rejBanner.remove();
+  // Remove any status banner (rejected / returned) if present
+  _root.querySelector('.status-banner')?.remove();
 
   showToast('Timesheet submitted for approval.', 'success');
 }

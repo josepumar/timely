@@ -190,6 +190,11 @@
   color: var(--color-danger-text);
 }
 
+.badge--returned {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .badge--active {
   background: var(--color-success-light);
   color: var(--color-success-text);

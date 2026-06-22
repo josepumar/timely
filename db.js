@@ -73,11 +73,76 @@ let _entries = [
   { id: 'e24', timesheetId: 'ts3', dayOffset: 6, timeIn: '08:00', timeOut: '12:00', chargeCodeId: 'cc1', remark: 'End-of-week wrap-up' },
 ];
 
+let _expenseCategories = [
+  { id: 'cat1', name: 'Meals & Entertainment', description: '', active: true },
+  { id: 'cat2', name: 'Office Supplies',        description: '', active: true },
+  { id: 'cat3', name: 'Travel',                 description: '', active: true },
+];
+
+let _expenses = [
+  {
+    id: 'ex1',
+    userId: 'u1',
+    date: '2026-06-15',
+    categoryId: 'cat1',
+    amount: 45.00,
+    description: 'Lunch with client',
+    receiptRef: '',
+    status: 'submitted',
+    submittedAt: '2026-06-15T13:00:00Z',
+    approvedBy: null,
+    approvedAt: null,
+    rejectionReason: null,
+  },
+  {
+    id: 'ex2',
+    userId: 'u2',
+    date: '2026-06-10',
+    categoryId: 'cat2',
+    amount: 120.00,
+    description: 'Office supplies — printer paper and toner',
+    receiptRef: 'R-2345',
+    status: 'approved',
+    submittedAt: '2026-06-11T10:00:00Z',
+    approvedBy: 'u3',
+    approvedAt: '2026-06-12T09:00:00Z',
+    rejectionReason: null,
+  },
+];
+
+// Audit log: chronological record of status changes for timesheets and expenses
+let _auditLog = [
+  // ts1 (Alice, submitted)
+  { id: 'al1', entityType: 'timesheet', entityId: 'ts1', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-16T10:32:00Z', note: '' },
+  // ts3 (Alice, approved the week before)
+  { id: 'al2', entityType: 'timesheet', entityId: 'ts3', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-09T09:00:00Z', note: '' },
+  { id: 'al3', entityType: 'timesheet', entityId: 'ts3', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-10T14:00:00Z', note: '' },
+  // ex1 (Alice expense, submitted)
+  { id: 'al4', entityType: 'expense', entityId: 'ex1', action: 'submitted', byId: 'u1', byName: 'Alice Smith', at: '2026-06-15T13:00:00Z', note: '' },
+  // ex2 (Bob expense, approved)
+  { id: 'al5', entityType: 'expense', entityId: 'ex2', action: 'submitted', byId: 'u2', byName: 'Bob Jones',   at: '2026-06-11T10:00:00Z', note: '' },
+  { id: 'al6', entityType: 'expense', entityId: 'ex2', action: 'approved',  byId: 'u3', byName: 'Carol Admin', at: '2026-06-12T09:00:00Z', note: '' },
+];
+
 let _nextId = 1000;
 function newId() { return 'x' + (_nextId++); }
 
 function ok(data)  { return Promise.resolve({ data, error: null }); }
 function err(msg)  { return Promise.resolve({ data: null, error: new Error(msg) }); }
+
+function _appendAudit(entityType, entityId, action, byId, note = '') {
+  const user = MOCK_USERS.find(u => u.id === byId);
+  _auditLog.push({
+    id: newId(),
+    entityType,
+    entityId,
+    action,
+    byId,
+    byName: user?.name ?? 'Unknown',
+    at: new Date().toISOString(),
+    note,
+  });
+}
 
 // ─── Charge Codes ────────────────────────────────────────────────────────────
 
@@ -138,6 +203,22 @@ export function getSubmittedTimesheets() {
   return ok(result);
 }
 
+export function getAllTimesheets() {
+  const nonDraft = _timesheets.filter(t => t.status !== 'draft');
+  const result = nonDraft.map(ts => {
+    const user = MOCK_USERS.find(u => u.id === ts.userId);
+    const entries = _entries.filter(e => e.timesheetId === ts.id);
+    const { total } = weeklyTotals(entries);
+    return {
+      timesheet: { ...ts },
+      userName: user?.name ?? 'Unknown',
+      totalHours: total,
+    };
+  });
+  result.sort((a, b) => (b.timesheet.submittedAt ?? '').localeCompare(a.timesheet.submittedAt ?? ''));
+  return ok(result);
+}
+
 export function getTimesheetById(id) {
   const ts = _timesheets.find(t => t.id === id);
   if (!ts) return err('Timesheet not found');
@@ -180,29 +261,41 @@ export function saveTimesheet(userId, weekStartIso, entries) {
 export function submitTimesheet(timesheetId) {
   const ts = _timesheets.find(t => t.id === timesheetId);
   if (!ts) return err('Timesheet not found');
-  if (ts.status !== 'draft' && ts.status !== 'rejected') {
+  if (ts.status !== 'draft' && ts.status !== 'rejected' && ts.status !== 'returned') {
     return err('Timesheet cannot be submitted in its current state');
   }
   ts.status = 'submitted';
   ts.submittedAt = new Date().toISOString();
   ts.rejectionReason = null;
+  _appendAudit('timesheet', timesheetId, 'submitted', ts.userId);
   return ok({ ...ts });
 }
 
-export function approveTimesheet(timesheetId, adminUserId) {
+export function approveTimesheet(timesheetId, adminUserId, note = '') {
   const ts = _timesheets.find(t => t.id === timesheetId);
   if (!ts) return err('Timesheet not found');
   ts.status = 'approved';
   ts.approvedBy = adminUserId ?? null;
   ts.approvedAt = new Date().toISOString();
+  _appendAudit('timesheet', timesheetId, 'approved', adminUserId, note);
   return ok({ ...ts });
 }
 
-export function rejectTimesheet(timesheetId, reason) {
+export function rejectTimesheet(timesheetId, reason, adminUserId) {
   const ts = _timesheets.find(t => t.id === timesheetId);
   if (!ts) return err('Timesheet not found');
   ts.status = 'rejected';
   ts.rejectionReason = reason;
+  _appendAudit('timesheet', timesheetId, 'rejected', adminUserId, reason);
+  return ok({ ...ts });
+}
+
+export function returnTimesheet(timesheetId, reason, adminUserId) {
+  const ts = _timesheets.find(t => t.id === timesheetId);
+  if (!ts) return err('Timesheet not found');
+  ts.status = 'returned';
+  ts.rejectionReason = reason;
+  _appendAudit('timesheet', timesheetId, 'returned', adminUserId, reason);
   return ok({ ...ts });
 }
 
@@ -216,4 +309,70 @@ export function getTimesheetsByUser(userId) {
       return { timesheet: { ...ts }, totalHours: total };
     });
   return ok(sheets);
+}
+
+// ─── Expenses ─────────────────────────────────────────────────────────────────
+
+export function getExpenseCategories() {
+  return ok([..._expenseCategories]);
+}
+
+export function getAllExpenses() {
+  const nonDraft = _expenses.filter(e => e.status !== 'draft');
+  const result = nonDraft.map(ex => {
+    const user = MOCK_USERS.find(u => u.id === ex.userId);
+    const category = _expenseCategories.find(c => c.id === ex.categoryId);
+    return {
+      expense: { ...ex },
+      userName: user?.name ?? 'Unknown',
+      categoryName: category?.name ?? 'Uncategorized',
+    };
+  });
+  result.sort((a, b) => (b.expense.submittedAt ?? '').localeCompare(a.expense.submittedAt ?? ''));
+  return ok(result);
+}
+
+export function getExpenseById(id) {
+  const ex = _expenses.find(e => e.id === id);
+  if (!ex) return err('Expense not found');
+  const user = MOCK_USERS.find(u => u.id === ex.userId);
+  const category = _expenseCategories.find(c => c.id === ex.categoryId);
+  return ok({ expense: { ...ex }, user: user ?? null, categoryName: category?.name ?? 'Uncategorized' });
+}
+
+export function approveExpense(id, adminUserId, note = '') {
+  const ex = _expenses.find(e => e.id === id);
+  if (!ex) return err('Expense not found');
+  ex.status = 'approved';
+  ex.approvedBy = adminUserId ?? null;
+  ex.approvedAt = new Date().toISOString();
+  _appendAudit('expense', id, 'approved', adminUserId, note);
+  return ok({ ...ex });
+}
+
+export function rejectExpense(id, reason, adminUserId) {
+  const ex = _expenses.find(e => e.id === id);
+  if (!ex) return err('Expense not found');
+  ex.status = 'rejected';
+  ex.rejectionReason = reason;
+  _appendAudit('expense', id, 'rejected', adminUserId, reason);
+  return ok({ ...ex });
+}
+
+export function returnExpense(id, reason, adminUserId) {
+  const ex = _expenses.find(e => e.id === id);
+  if (!ex) return err('Expense not found');
+  ex.status = 'returned';
+  ex.rejectionReason = reason;
+  _appendAudit('expense', id, 'returned', adminUserId, reason);
+  return ok({ ...ex });
+}
+
+// ─── Audit Log ────────────────────────────────────────────────────────────────
+
+export function getAuditLog(entityType, entityId) {
+  const events = _auditLog
+    .filter(e => e.entityType === entityType && e.entityId === entityId)
+    .sort((a, b) => a.at.localeCompare(b.at));
+  return ok(events.map(e => ({ ...e })));
 }

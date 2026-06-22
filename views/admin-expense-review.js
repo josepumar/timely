@@ -1,120 +1,97 @@
 import { renderAdminShell } from './admin-layout.js';
-import { timesheetGridReadonlyHtml } from './timesheet-rows.js';
 import * as db from '../db.js';
-import { fmtHours, remarksRollup } from '../calc.js';
 import { navigate, showToast } from '../app.js';
 import { currentUser } from '../auth.js';
 
 export async function render(root, { id }) {
-  const main = renderAdminShell(root, '#/admin/review/' + id, '');
+  const main = renderAdminShell(root, '#/admin/expense-review/' + id, '');
   await loadReview(main, id);
 }
 
 async function loadReview(main, id) {
   main.innerHTML = '<div class="loading-spinner" aria-label="Loading…"></div>';
 
-  const [{ data: tsData, error: tsErr }, { data: ccData }, { data: auditData }] = await Promise.all([
-    db.getTimesheetById(id),
-    db.getChargeCodes(),
-    db.getAuditLog('timesheet', id),
+  const [{ data: exData, error: exErr }, { data: auditData }] = await Promise.all([
+    db.getExpenseById(id),
+    db.getAuditLog('expense', id),
   ]);
 
-  if (tsErr || !tsData) {
+  if (exErr || !exData) {
     main.innerHTML = `<a class="back-link" href="#/admin/all">&#8592; Back</a>
-      <p style="color:var(--color-danger)">Timesheet not found.</p>`;
+      <p style="color:var(--color-danger)">Expense not found.</p>`;
     return;
   }
 
-  const { timesheet: ts, user, entries, totals } = tsData;
-  const chargeCodes = ccData ?? [];
+  const { expense: ex, user, categoryName } = exData;
   const auditEvents = auditData ?? [];
+  const adminId     = currentUser()?.id;
 
-  const weekLabel = formatWeek(ts.weekStart);
-  const rollup    = remarksRollup(entries);
-  const adminId   = currentUser()?.id;
-
-  const canDecide   = ts.status === 'submitted';
-  const canSendBack = ts.status === 'approved' || ts.status === 'returned';
+  const canDecide   = ex.status === 'submitted';
+  const canSendBack = ex.status === 'approved' || ex.status === 'returned';
 
   main.innerHTML = `
     <a class="back-link" href="#/admin/all">&#8592; Back to All Submissions</a>
     <div style="display:flex;align-items:center;gap:var(--space-4);margin-bottom:var(--space-6);flex-wrap:wrap">
-      <h1 style="margin:0">${esc(user?.name ?? 'Employee')} — ${esc(weekLabel)}</h1>
-      <span class="badge badge--${ts.status}" id="status-badge">${statusLabel(ts.status)}</span>
+      <h1 style="margin:0">${esc(user?.name ?? 'Employee')} — Expense</h1>
+      <span class="badge badge--${ex.status}" id="status-badge">${statusLabel(ex.status)}</span>
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 300px;gap:var(--space-6);align-items:start" id="review-grid">
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:var(--space-6);align-items:start">
 
-      <div>
-        <h2 style="font-size:var(--font-size-lg);margin-bottom:var(--space-4)">Time Entries</h2>
-        ${timesheetGridReadonlyHtml(entries, chargeCodes, ts.weekStart)}
+      <div class="section-card" style="margin-top:0">
+        <h2>Expense Details</h2>
+        <dl class="expense-detail-list">
+          <div class="expense-detail-list__row">
+            <dt>Date</dt>
+            <dd>${esc(formatDate(ex.date))}</dd>
+          </div>
+          <div class="expense-detail-list__row">
+            <dt>Category</dt>
+            <dd>${esc(categoryName)}</dd>
+          </div>
+          <div class="expense-detail-list__row">
+            <dt>Amount</dt>
+            <dd><strong>$${Number(ex.amount).toFixed(2)}</strong></dd>
+          </div>
+          <div class="expense-detail-list__row">
+            <dt>Description</dt>
+            <dd>${esc(ex.description)}</dd>
+          </div>
+          ${ex.receiptRef ? `<div class="expense-detail-list__row">
+            <dt>Receipt Ref</dt>
+            <dd>${esc(ex.receiptRef)}</dd>
+          </div>` : ''}
+          <div class="expense-detail-list__row">
+            <dt>Submitted</dt>
+            <dd>${ex.submittedAt ? formatDateTime(ex.submittedAt) : '—'}</dd>
+          </div>
+          ${ex.rejectionReason ? `<div class="expense-detail-list__row">
+            <dt>Last reason</dt>
+            <dd style="color:var(--color-neutral-600);font-style:italic">${esc(ex.rejectionReason)}</dd>
+          </div>` : ''}
+        </dl>
       </div>
 
       <aside>
-        <div class="section-card" style="margin-top:0">
-          <h2>Weekly Summary</h2>
-          <table class="totals-table" aria-label="Weekly totals">
-            <thead>
-              <tr>
-                <th scope="col">Charge Code</th>
-                <th scope="col" style="text-align:right">Hours</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${Object.entries(totals.byCode).filter(([,h]) => h > 0).map(([ccId, h]) => {
-                const cc = chargeCodes.find(c => c.id === ccId);
-                return `<tr>
-                  <th scope="row" style="font-weight:normal">${esc(cc?.code ?? ccId)}</th>
-                  <td style="text-align:right">${fmtHours(h)}</td>
-                </tr>`;
-              }).join('')}
-            </tbody>
-            <tfoot>
-              <tr class="totals-table__divider">
-                <th scope="row">Regular</th>
-                <td style="text-align:right">${fmtHours(totals.regular)}</td>
-              </tr>
-              ${totals.overtime > 0 ? `<tr class="totals-table__overtime">
-                <th scope="row">Overtime</th>
-                <td style="text-align:right">${fmtHours(totals.overtime)}</td>
-              </tr>` : ''}
-              <tr class="totals-table__total">
-                <th scope="row">Total</th>
-                <td style="text-align:right">${fmtHours(totals.total)}</td>
-              </tr>
-            </tfoot>
-          </table>
-
-          ${rollup ? `<div style="margin-top:var(--space-4)">
-            <p style="font-size:var(--font-size-sm);font-weight:600;color:var(--color-neutral-600);margin-bottom:var(--space-2)">Remarks</p>
-            <div class="remarks-rollup">${esc(rollup)}</div>
-          </div>` : ''}
-        </div>
-
         ${canDecide ? `
-        <div class="section-card" id="decision-card">
+        <div class="section-card" style="margin-top:0">
           <h2>Decision</h2>
           <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-            <div>
-              <label for="approve-note" style="font-size:var(--font-size-sm);color:var(--color-neutral-600);display:block;margin-bottom:var(--space-1)">Note (optional)</label>
-              <textarea id="approve-note" class="input input--textarea" rows="2"
-                placeholder="Optional note visible to employee"></textarea>
-            </div>
             <button class="btn btn--success btn--block" id="approve-btn">&#10003; Approve</button>
-            <div class="reject-section">
+            <div>
               <label for="reject-reason" style="font-size:var(--font-size-sm);color:var(--color-neutral-600);display:block;margin-bottom:var(--space-1)">Rejection reason <span style="color:var(--color-danger)">*</span></label>
               <textarea id="reject-reason" class="input input--textarea" rows="2"
                 placeholder="Required — employee will see this message"></textarea>
               <button class="btn btn--danger btn--block" id="reject-btn" style="margin-top:var(--space-2)">&#10005; Reject</button>
             </div>
           </div>
-        </div>` : ''}
+        </div>` : `<div style="margin-top:0"></div>`}
 
         ${canSendBack ? `
-        <div class="section-card" id="sendback-card">
+        <div class="section-card" ${canDecide ? '' : 'style="margin-top:0"'}>
           <h2>Send Back for Revision</h2>
           <p style="font-size:var(--font-size-sm);color:var(--color-neutral-500);margin-bottom:var(--space-3)">
-            Returns this timesheet to the employee for editing and resubmission.
+            Returns this expense to the employee for editing and resubmission.
           </p>
           <label for="return-reason" style="font-size:var(--font-size-sm);color:var(--color-neutral-600);display:block;margin-bottom:var(--space-1)">Reason <span style="color:var(--color-danger)">*</span></label>
           <textarea id="return-reason" class="input input--textarea" rows="2"
@@ -133,13 +110,12 @@ async function loadReview(main, id) {
   // ── Approve ──
   if (canDecide) {
     main.querySelector('#approve-btn').addEventListener('click', async () => {
-      const btn  = main.querySelector('#approve-btn');
-      const note = main.querySelector('#approve-note').value.trim();
+      const btn = main.querySelector('#approve-btn');
       btn.disabled = true; btn.textContent = 'Approving…';
-      const { error } = await db.approveTimesheet(id, adminId, note);
+      const { error } = await db.approveExpense(id, adminId);
       if (error) { showToast(error.message, 'error'); btn.disabled = false; btn.textContent = '✓ Approve'; return; }
-      showToast('Timesheet approved.', 'success');
-      navigate('#/admin/approvals');
+      showToast('Expense approved.', 'success');
+      navigate('#/admin/all');
     });
 
     main.querySelector('#reject-btn').addEventListener('click', async () => {
@@ -152,10 +128,10 @@ async function loadReview(main, id) {
       textarea.removeAttribute('aria-invalid');
       const btn = main.querySelector('#reject-btn');
       btn.disabled = true; btn.textContent = 'Rejecting…';
-      const { error } = await db.rejectTimesheet(id, reason, adminId);
+      const { error } = await db.rejectExpense(id, reason, adminId);
       if (error) { showToast(error.message, 'error'); btn.disabled = false; btn.textContent = '✕ Reject'; return; }
-      showToast('Timesheet rejected.', 'info');
-      navigate('#/admin/approvals');
+      showToast('Expense rejected.', 'info');
+      navigate('#/admin/all');
     });
   }
 
@@ -171,10 +147,9 @@ async function loadReview(main, id) {
       textarea.removeAttribute('aria-invalid');
       const btn = main.querySelector('#sendback-btn');
       btn.disabled = true; btn.textContent = 'Sending back…';
-      const { error } = await db.returnTimesheet(id, reason, adminId);
+      const { error } = await db.returnExpense(id, reason, adminId);
       if (error) { showToast(error.message, 'error'); btn.disabled = false; btn.textContent = '↶ Send Back'; return; }
-      showToast('Timesheet returned to employee for revision.', 'info');
-      // Reload in place so the timeline updates
+      showToast('Expense returned to employee for revision.', 'info');
       await loadReview(main, id);
     });
   }
@@ -201,11 +176,8 @@ function actionLabel(a) {
   return { submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected', returned: 'Returned for revision' }[a] ?? a;
 }
 
-function formatWeek(weekStart) {
-  const sat = new Date(weekStart + 'T00:00:00');
-  const fri = new Date(sat); fri.setDate(fri.getDate() + 6);
-  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  return `${fmt(sat)} – ${fmt(fri)}`;
+function formatDate(iso) {
+  return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
 function formatDateTime(iso) {
