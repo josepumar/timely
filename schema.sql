@@ -87,7 +87,7 @@ create table if not exists audit_log (
   entity_type  text not null check (entity_type in ('timesheet','expense')),
   entity_id    uuid not null,
   action       text not null,
-  performed_by uuid references profiles(id),
+  performed_by uuid references profiles(id) on delete set null,
   performed_at timestamptz default now(),
   note         text not null default ''
 );
